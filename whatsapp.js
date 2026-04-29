@@ -1,53 +1,14 @@
-const fs = require('fs');
-const path = require('path');
-const { Client, RemoteAuth } = require('whatsapp-web.js');
-const { guardarMensaje, guardarSesion, obtenerSesion, eliminarSesion } = require('./db');
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const { guardarMensaje } = require('./db');
 const { debeAnalizarse, obtenerFlags } = require('./filtros');
 require('dotenv').config();
-
-const REMOTE_AUTH_DATA_PATH = '.wwebjs_auth';
-
-// Store personalizado que guarda el zip de sesión en Turso como base64
-class TursoStore {
-  async sessionExists({ session }) {
-    const data = await obtenerSesion(session);
-    return !!data;
-  }
-
-  async save({ session }) {
-    const zipPath = path.join(REMOTE_AUTH_DATA_PATH, `${session}.zip`);
-    if (!fs.existsSync(zipPath)) {
-      console.warn(`[TursoStore] No se encontró el zip en ${zipPath} para guardar`);
-      return;
-    }
-    const base64 = fs.readFileSync(zipPath).toString('base64');
-    await guardarSesion(session, base64);
-    console.log(`[TursoStore] Sesión "${session}" guardada en Turso`);
-  }
-
-  async extract({ session, path: destPath }) {
-    const base64 = await obtenerSesion(session);
-    if (!base64) throw new Error(`[TursoStore] No hay sesión guardada para "${session}"`);
-    fs.writeFileSync(destPath, Buffer.from(base64, 'base64'));
-    console.log(`[TursoStore] Sesión "${session}" restaurada desde Turso`);
-  }
-
-  async delete({ session }) {
-    await eliminarSesion(session);
-    console.log(`[TursoStore] Sesión "${session}" eliminada de Turso`);
-  }
-}
 
 let client;
 
 function crearCliente(callbacks = {}) {
   client = new Client({
-    authStrategy: new RemoteAuth({
-      clientId: 'default',
-      store: new TursoStore(),
-      dataPath: REMOTE_AUTH_DATA_PATH,
-      backupSyncIntervalMs: 300000,
-    }),
+    authStrategy: new LocalAuth({ dataPath: '/tmp/.wwebjs_auth' }),
+    authTimeoutMs: 0, // sin timeout — Render puede tardar en cargar WhatsApp Web
     puppeteer: {
       headless: true,
       args: [
@@ -55,10 +16,10 @@ function crearCliente(callbacks = {}) {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
+        '--single-process',   // crítico en entornos con poca memoria como Render free
         '--no-zygote',
         '--disable-extensions',
         '--disable-background-networking',
-        '--disable-default-apps',
         '--mute-audio',
       ],
     },
@@ -69,8 +30,8 @@ function crearCliente(callbacks = {}) {
     if (callbacks.onQR) callbacks.onQR(qr);
   });
 
-  client.on('remote_session_saved', () => {
-    console.log(`[WA] Sesión sincronizada con Turso`);
+  client.on('loading_screen', (percent, message) => {
+    console.log(`[WA] Cargando WhatsApp Web: ${percent}% — ${message}`);
   });
 
   client.on('authenticated', () => {
