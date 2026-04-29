@@ -1,0 +1,16 @@
+{
+  "name": "botwp",
+  "version": "1.0.0",
+  "description": "Bot de WhatsApp que monitorea mensajes, analiza con Gemini y manda resúmenes",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "@libsql/client": "^0.14.0",
+    "dotenv": "^16.4.7",
+    "node-cron": "^3.0.3",
+    "whatsapp-web.js": "^1.26.0"
+  }
+}
