@@ -1,7 +1,7 @@
 const http = require('http');
 const cron = require('node-cron');
 const QRCode = require('qrcode');
-const { conectar, obtenerMensajesSinProcesar, marcarProcesados } = require('./db');
+const { conectar, obtenerMensajesSinProcesar, marcarProcesados, guardarMensaje } = require('./db');
 const { iniciarCliente, enviarResumen } = require('./whatsapp');
 const { analizarMensajes } = require('./gemini');
 const config = require('./config.json');
@@ -16,9 +16,46 @@ function iniciarServidor() {
   const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
 
+    // Endpoint de prueba: inserta un mensaje ficticio y dispara el análisis
+    if (req.url === '/test' && req.method === 'GET') {
+      if (estadoWA !== 'conectado') {
+        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
+          <h2>⚠️ El bot no está conectado aún</h2>
+          <p>Primero escaneá el QR para vincular WhatsApp.</p>
+          <a href="/">← Volver</a>
+        </body></html>`);
+        return;
+      }
+      try {
+        await guardarMensaje({
+          chatId: 'test@c.us',
+          chatNombre: 'Chat de prueba',
+          remitente: 'Tester',
+          remitenteId: 'test@c.us',
+          cuerpo: 'Este es un mensaje de prueba URGENTE — verificá que el bot funciona correctamente.',
+          timestamp: Math.floor(Date.now() / 1000),
+          esVip: false,
+          tieneKeyword: true,
+        });
+        await procesarMensajes();
+        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
+          <h2>✅ Prueba ejecutada</h2>
+          <p>Se insertó un mensaje de prueba y se disparó el análisis.<br>
+          Revisá tu WhatsApp — deberías recibir el resumen en unos segundos.</p>
+          <p style="color:#888;font-size:.85rem">También revisá los logs en Render para ver si hubo algún error.</p>
+          <a href="/">← Volver</a>
+        </body></html>`);
+      } catch (err) {
+        res.end(`<p>Error en prueba: ${err.message}</p>`);
+      }
+      return;
+    }
+
     if (estadoWA === 'conectado') {
       res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
-        <h2>✅ WhatsApp conectado</h2><p>El bot está activo y escuchando mensajes.</p>
+        <h2>✅ WhatsApp conectado</h2>
+        <p>El bot está activo y escuchando mensajes.</p>
+        <p><a href="/test" style="display:inline-block;margin-top:16px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p>
       </body></html>`);
       return;
     }
