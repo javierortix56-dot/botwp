@@ -26,7 +26,7 @@ function iniciarServidor() {
       try {
         const imgDataUrl = await QRCode.toDataURL(qrActual, { width: 300 });
         res.end(`<!DOCTYPE html><html><head>
-          <meta http-equiv="refresh" content="30">
+          <meta http-equiv="refresh" content="5">
           <title>Escanear QR — botwp</title>
         </head><body style="font-family:sans-serif;text-align:center;padding:60px">
           <h2>Escanea este QR con WhatsApp</h2>
