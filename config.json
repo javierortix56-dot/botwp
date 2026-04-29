@@ -1,0 +1,24 @@
+{
+  "vips": [
+    "5491112345678",
+    "5491187654321"
+  ],
+  "grupos": [
+    "Trabajo equipo",
+    "Familia"
+  ],
+  "keywords": [
+    "urgente",
+    "importante",
+    "reunión",
+    "deadline",
+    "pago",
+    "factura",
+    "llamame",
+    "llámame"
+  ],
+  "resumen": {
+    "hora_cron": "0 * * * *",
+    "max_mensajes_por_batch": 5
+  }
+}
