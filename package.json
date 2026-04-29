@@ -8,11 +8,11 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
+    "@hapi/boom": "^10.0.1",
     "@libsql/client": "^0.14.0",
+    "@whiskeysockets/baileys": "^6.7.18",
     "dotenv": "^16.4.7",
     "node-cron": "^3.0.3",
-    "qrcode": "^1.5.4",
-    "unzipper": "^0.10.14",
-    "whatsapp-web.js": "^1.26.0"
+    "qrcode": "^1.5.4"
   }
 }
