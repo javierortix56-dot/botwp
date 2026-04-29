@@ -8,8 +8,9 @@ const config = require('./config.json');
 
 const PORT = process.env.PORT || 3000;
 
-let estadoWA = 'arrancando'; // 'arrancando' | 'qr' | 'conectado'
+let estadoWA = 'arrancando'; // 'arrancando' | 'qr' | 'autenticando' | 'conectado'
 let qrActual = null;
+let tsAutenticando = null;
 
 function iniciarServidor() {
   const server = http.createServer(async (req, res) => {
@@ -18,6 +19,24 @@ function iniciarServidor() {
     if (estadoWA === 'conectado') {
       res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
         <h2>✅ WhatsApp conectado</h2><p>El bot está activo y escuchando mensajes.</p>
+      </body></html>`);
+      return;
+    }
+
+    if (estadoWA === 'autenticando') {
+      const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : 0;
+      res.end(`<!DOCTYPE html><html><head>
+        <meta http-equiv="refresh" content="5">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>Conectando...</title>
+      </head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5">
+        <div style="background:#fff;border-radius:12px;max-width:400px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)">
+          <div style="font-size:3rem;margin-bottom:16px">🔄</div>
+          <h2 style="margin:0 0 12px">QR escaneado — conectando...</h2>
+          <p style="color:#555;margin:0 0 8px">WhatsApp recibió el QR. Esperando que el servidor termine de autenticar.</p>
+          <p style="color:#888;font-size:.85rem">Tiempo esperando: ${segs}s — esta página se actualiza sola cada 5 segundos.</p>
+          ${segs > 60 ? `<p style="color:#c0392b;font-size:.85rem;margin-top:16px">⚠️ Está tardando más de lo normal. Revisá los logs en Render para ver si hay un error.</p>` : ''}
+        </div>
       </body></html>`);
       return;
     }
@@ -142,11 +161,20 @@ async function main() {
       onQR: (qr) => {
         estadoWA = 'qr';
         qrActual = qr;
+        tsAutenticando = null;
         console.log(`[WA] QR listo — visitá https://botwp-ikbb.onrender.com para escanearlo`);
       },
+      onAutenticando: () => {
+        estadoWA = 'autenticando';
+        qrActual = null;
+        tsAutenticando = Date.now();
+        console.log(`[WA] QR escaneado — autenticando con los servidores de WhatsApp...`);
+      },
       onListo: () => {
+        const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : '?';
         estadoWA = 'conectado';
         qrActual = null;
+        console.log(`[WA] ¡Listo! Conectado en ${segs}s desde el escaneo`);
       },
     });
   } catch (err) {
