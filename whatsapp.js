@@ -1,5 +1,5 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const { guardarMensaje, guardarSesion, obtenerSesion } = require('./db');
+const { guardarMensaje, guardarSesion } = require('./db');
 const { debeAnalizarse, obtenerFlags } = require('./filtros');
 require('dotenv').config();
 

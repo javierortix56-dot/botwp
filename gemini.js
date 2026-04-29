@@ -1,10 +1,11 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const config = require('./config.json');
 require('dotenv').config();
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
-const BATCH_SIZE = 5;
+const BATCH_SIZE = config.resumen.max_mensajes_por_batch;
 
 const PROMPT_SISTEMA = `Eres un asistente que clasifica mensajes de WhatsApp para su dueño.
 Para cada mensaje devuelves EXACTAMENTE uno de estos tres valores:
