@@ -46,11 +46,21 @@ function crearCliente(callbacks = {}) {
       clientId: 'default',
       store: new TursoStore(),
       dataPath: REMOTE_AUTH_DATA_PATH,
-      backupSyncIntervalMs: 300000, // guarda en Turso cada 5 minutos
+      backupSyncIntervalMs: 300000,
     }),
     puppeteer: {
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-zygote',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--mute-audio',
+      ],
     },
   });
 
@@ -64,7 +74,8 @@ function crearCliente(callbacks = {}) {
   });
 
   client.on('authenticated', () => {
-    console.log(`[WA] Sesión autenticada`);
+    console.log(`[WA] Evento authenticated — cargando WhatsApp Web en el navegador...`);
+    if (callbacks.onAutenticando) callbacks.onAutenticando();
   });
 
   client.on('auth_failure', (msg) => {
