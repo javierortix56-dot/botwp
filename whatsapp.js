@@ -1,13 +1,53 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const { guardarMensaje, guardarSesion } = require('./db');
+const fs = require('fs');
+const path = require('path');
+const { Client, RemoteAuth } = require('whatsapp-web.js');
+const { guardarMensaje, guardarSesion, obtenerSesion, eliminarSesion } = require('./db');
 const { debeAnalizarse, obtenerFlags } = require('./filtros');
 require('dotenv').config();
+
+const REMOTE_AUTH_DATA_PATH = '.wwebjs_auth';
+
+// Store personalizado que guarda el zip de sesión en Turso como base64
+class TursoStore {
+  async sessionExists({ session }) {
+    const data = await obtenerSesion(session);
+    return !!data;
+  }
+
+  async save({ session }) {
+    const zipPath = path.join(REMOTE_AUTH_DATA_PATH, `${session}.zip`);
+    if (!fs.existsSync(zipPath)) {
+      console.warn(`[TursoStore] No se encontró el zip en ${zipPath} para guardar`);
+      return;
+    }
+    const base64 = fs.readFileSync(zipPath).toString('base64');
+    await guardarSesion(session, base64);
+    console.log(`[TursoStore] Sesión "${session}" guardada en Turso`);
+  }
+
+  async extract({ session, path: destPath }) {
+    const base64 = await obtenerSesion(session);
+    if (!base64) throw new Error(`[TursoStore] No hay sesión guardada para "${session}"`);
+    fs.writeFileSync(destPath, Buffer.from(base64, 'base64'));
+    console.log(`[TursoStore] Sesión "${session}" restaurada desde Turso`);
+  }
+
+  async delete({ session }) {
+    await eliminarSesion(session);
+    console.log(`[TursoStore] Sesión "${session}" eliminada de Turso`);
+  }
+}
 
 let client;
 
 function crearCliente(callbacks = {}) {
   client = new Client({
-    authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }),
+    authStrategy: new RemoteAuth({
+      clientId: 'default',
+      store: new TursoStore(),
+      dataPath: REMOTE_AUTH_DATA_PATH,
+      backupSyncIntervalMs: 300000, // guarda en Turso cada 5 minutos
+    }),
     puppeteer: {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
@@ -19,11 +59,12 @@ function crearCliente(callbacks = {}) {
     if (callbacks.onQR) callbacks.onQR(qr);
   });
 
-  client.on('authenticated', async (session) => {
+  client.on('remote_session_saved', () => {
+    console.log(`[WA] Sesión sincronizada con Turso`);
+  });
+
+  client.on('authenticated', () => {
     console.log(`[WA] Sesión autenticada`);
-    if (session) {
-      await guardarSesion('default', JSON.stringify(session));
-    }
   });
 
   client.on('auth_failure', (msg) => {
@@ -41,7 +82,6 @@ function crearCliente(callbacks = {}) {
 
   client.on('message', async (msg) => {
     try {
-      // Ignorar mensajes propios, estados y sin texto
       if (msg.fromMe || msg.isStatus || !msg.body) return;
 
       const chat = await msg.getChat();

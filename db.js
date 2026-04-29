@@ -97,4 +97,12 @@ async function obtenerSesion(id) {
   }
 }
 
-module.exports = { conectar, guardarMensaje, obtenerMensajesSinProcesar, marcarProcesados, guardarSesion, obtenerSesion };
+async function eliminarSesion(id) {
+  try {
+    await db.execute({ sql: `DELETE FROM sesion_wa WHERE id = ?`, args: [id] });
+  } catch (err) {
+    console.error(`[DB] Error al eliminar sesión WA:`, err.message);
+  }
+}
+
+module.exports = { conectar, guardarMensaje, obtenerMensajesSinProcesar, marcarProcesados, guardarSesion, obtenerSesion, eliminarSesion };
