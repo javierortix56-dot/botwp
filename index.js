@@ -63,7 +63,7 @@ function iniciarServidor() {
     if (estadoWA === 'autenticando') {
       const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : 0;
       res.end(`<!DOCTYPE html><html><head>
-        <meta http-equiv="refresh" content="5">
+        <meta http-equiv="refresh" content="2">
         <meta name="viewport" content="width=device-width,initial-scale=1">
         <title>Conectando...</title>
       </head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5">
@@ -71,26 +71,8 @@ function iniciarServidor() {
           <div style="font-size:3rem;margin-bottom:16px">🔄</div>
           <h2 style="margin:0 0 12px">QR escaneado — conectando...</h2>
           <p style="color:#555;margin:0 0 8px">WhatsApp recibió el QR. Esperando que el servidor termine de autenticar.</p>
-          <p style="color:#888;font-size:.85rem">Tiempo esperando: ${segs}s — esta página se actualiza sola cada 5 segundos.</p>
-          ${segs > 60 ? `<p style="color:#c0392b;font-size:.85rem;margin-top:16px">⚠️ Está tardando más de lo normal. Revisá los logs en Render para ver si hay un error.</p>` : ''}
-        </div>
-      </body></html>`);
-      return;
-    }
-
-    if (estadoWA === 'autenticando') {
-      const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : 0;
-      res.end(`<!DOCTYPE html><html><head>
-        <meta http-equiv="refresh" content="5">
-        <meta name="viewport" content="width=device-width,initial-scale=1">
-        <title>Conectando...</title>
-      </head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5">
-        <div style="background:#fff;border-radius:12px;max-width:400px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)">
-          <div style="font-size:3rem;margin-bottom:16px">🔄</div>
-          <h2 style="margin:0 0 12px">QR escaneado — conectando...</h2>
-          <p style="color:#555;margin:0 0 8px">WhatsApp recibió el QR. Esperando que el servidor termine de autenticar.</p>
-          <p style="color:#888;font-size:.85rem">Tiempo esperando: ${segs}s — esta página se actualiza sola cada 5 segundos.</p>
-          ${segs > 60 ? `<p style="color:#c0392b;font-size:.85rem;margin-top:16px">⚠️ Está tardando más de lo normal. Revisá los logs en Render para ver si hay un error.</p>` : ''}
+          <p style="color:#888;font-size:.85rem">Tiempo esperando: ${segs}s — la página se actualiza sola.</p>
+          ${segs > 30 ? `<p style="color:#c0392b;font-size:.85rem;margin-top:16px">⚠️ Está tardando más de lo normal. Revisá los logs en Render.</p>` : ''}
         </div>
       </body></html>`);
       return;
@@ -102,7 +84,7 @@ function iniciarServidor() {
         res.end(`<!DOCTYPE html>
 <html>
 <head>
-  <meta http-equiv="refresh" content="30">
+  <meta http-equiv="refresh" content="3">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Vincular WhatsApp — botwp</title>
   <style>
@@ -152,7 +134,7 @@ function iniciarServidor() {
       </ol>
     </details>
 
-    <p class="refresh-note">Esta página se actualiza sola cada 30 segundos. El QR expira en ~60 seg.</p>
+    <p class="refresh-note">Esta página se actualiza cada 3 segundos — apenas escanees vas a ver el cambio.</p>
   </div>
 </body>
 </html>`);

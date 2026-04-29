@@ -13,6 +13,7 @@ const logger = { level: 'silent', trace: () => {}, debug: () => {}, info: () => 
 
 let sock = null;
 let sockCallbacks = {};
+let qrEmitido = false;
 
 async function restaurarSesion() {
   const data = await obtenerSesion('baileys');
@@ -75,16 +76,23 @@ async function conectar(callbacks = {}) {
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
+      qrEmitido = true;
       console.log(`[WA] QR generado`);
       if (sockCallbacks.onQR) sockCallbacks.onQR(qr);
     }
 
     if (connection === 'connecting') {
-      console.log(`[WA] Conectando con los servidores de WhatsApp...`);
-      if (sockCallbacks.onAutenticando) sockCallbacks.onAutenticando();
+      // Si ya mostramos un QR y ahora estamos "connecting" sin QR nuevo, el usuario lo escaneó
+      if (qrEmitido && !qr) {
+        console.log(`[WA] QR escaneado — autenticando con WhatsApp...`);
+        if (sockCallbacks.onAutenticando) sockCallbacks.onAutenticando();
+      } else {
+        console.log(`[WA] Estableciendo conexión con WhatsApp...`);
+      }
     }
 
     if (connection === 'open') {
+      qrEmitido = false;
       console.log(`[WA] Cliente listo — escuchando mensajes`);
       if (sockCallbacks.onListo) sockCallbacks.onListo();
     }
