@@ -24,16 +24,64 @@ function iniciarServidor() {
 
     if (estadoWA === 'qr' && qrActual) {
       try {
-        const imgDataUrl = await QRCode.toDataURL(qrActual, { width: 300 });
-        res.end(`<!DOCTYPE html><html><head>
-          <meta http-equiv="refresh" content="30">
-          <title>Escanear QR — botwp</title>
-        </head><body style="font-family:sans-serif;text-align:center;padding:60px">
-          <h2>Escanea este QR con WhatsApp</h2>
-          <p>Abrí WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
-          <img src="${imgDataUrl}" style="margin:20px auto;display:block"/>
-          <p style="color:#888;font-size:13px">Esta página se actualiza sola cada 30 segundos</p>
-        </body></html>`);
+        const imgDataUrl = await QRCode.toDataURL(qrActual, { width: 280, margin: 2 });
+        res.end(`<!DOCTYPE html>
+<html>
+<head>
+  <meta http-equiv="refresh" content="30">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Vincular WhatsApp — botwp</title>
+  <style>
+    body { font-family: sans-serif; background: #f0f2f5; margin: 0; padding: 32px 16px; color: #111; }
+    .card { background: #fff; border-radius: 12px; max-width: 480px; margin: 0 auto; padding: 32px 24px; box-shadow: 0 2px 12px rgba(0,0,0,.08); text-align: center; }
+    h2 { margin: 0 0 8px; font-size: 1.3rem; }
+    .warning { background: #fff3cd; border-left: 4px solid #f0a500; border-radius: 4px; padding: 12px 16px; margin: 20px 0; text-align: left; font-size: .9rem; }
+    .steps { text-align: left; background: #f0f2f5; border-radius: 8px; padding: 16px 16px 16px 32px; margin: 20px 0; font-size: .92rem; line-height: 1.8; }
+    .steps li { margin-bottom: 4px; }
+    .steps strong { color: #075e54; }
+    .qr-img { border: 3px solid #075e54; border-radius: 8px; padding: 8px; margin: 20px auto; display: block; }
+    .refresh-note { color: #888; font-size: .8rem; margin-top: 16px; }
+    .platform { margin-top: 16px; }
+    .platform summary { cursor: pointer; font-size: .85rem; color: #555; }
+    .platform ol { margin: 8px 0 0; font-size: .85rem; line-height: 1.7; padding-left: 20px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>📱 Vincular WhatsApp al bot</h2>
+    <div class="warning">
+      ⚠️ <strong>No uses la cámara del teléfono ni Google Lens</strong> para escanear este QR — eso no funciona con WhatsApp.<br>
+      Debés escanearlo desde <strong>adentro de la app de WhatsApp</strong>.
+    </div>
+
+    <img src="${imgDataUrl}" class="qr-img" width="280" height="280" alt="QR WhatsApp"/>
+
+    <div class="steps">
+      <strong>Android:</strong>
+      <ol>
+        <li>Abrí <strong>WhatsApp</strong></li>
+        <li>Tocá los <strong>tres puntos ⋮</strong> (arriba a la derecha)</li>
+        <li>Tocá <strong>Dispositivos vinculados</strong></li>
+        <li>Tocá <strong>Vincular dispositivo</strong></li>
+        <li>Apuntá la cámara <em>de WhatsApp</em> al QR de arriba</li>
+      </ol>
+    </div>
+
+    <details class="platform">
+      <summary>¿Usás iPhone? Ver pasos para iOS</summary>
+      <ol>
+        <li>Abrí <strong>WhatsApp</strong></li>
+        <li>Tocá <strong>Configuración</strong> (abajo a la derecha)</li>
+        <li>Tocá <strong>Dispositivos vinculados</strong></li>
+        <li>Tocá <strong>Vincular dispositivo</strong></li>
+        <li>Apuntá la cámara <em>de WhatsApp</em> al QR de arriba</li>
+      </ol>
+    </details>
+
+    <p class="refresh-note">Esta página se actualiza sola cada 30 segundos. El QR expira en ~60 seg.</p>
+  </div>
+</body>
+</html>`);
       } catch (err) {
         res.end(`<p>Error generando QR: ${err.message}</p>`);
       }
