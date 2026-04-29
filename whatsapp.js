@@ -11,15 +11,18 @@ function crearCliente(callbacks = {}) {
     authTimeoutMs: 0, // sin timeout — Render puede tardar en cargar WhatsApp Web
     puppeteer: {
       headless: true,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
-        '--single-process',   // crítico en entornos con poca memoria como Render free
+        '--single-process',
         '--no-zygote',
         '--disable-extensions',
         '--disable-background-networking',
+        '--disable-accelerated-2d-canvas',
+        '--disable-canvas-aa',
         '--mute-audio',
       ],
     },
