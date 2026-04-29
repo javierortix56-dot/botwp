@@ -1,10 +1,54 @@
+const http = require('http');
 const cron = require('node-cron');
+const QRCode = require('qrcode');
 const { conectar, obtenerMensajesSinProcesar, marcarProcesados } = require('./db');
 const { iniciarCliente, enviarResumen } = require('./whatsapp');
 const { analizarMensajes } = require('./gemini');
 const config = require('./config.json');
 
-let clienteWA;
+const PORT = process.env.PORT || 3000;
+
+let estadoWA = 'arrancando'; // 'arrancando' | 'qr' | 'conectado'
+let qrActual = null;
+
+function iniciarServidor() {
+  const server = http.createServer(async (req, res) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+
+    if (estadoWA === 'conectado') {
+      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
+        <h2>✅ WhatsApp conectado</h2><p>El bot está activo y escuchando mensajes.</p>
+      </body></html>`);
+      return;
+    }
+
+    if (estadoWA === 'qr' && qrActual) {
+      try {
+        const imgDataUrl = await QRCode.toDataURL(qrActual, { width: 300 });
+        res.end(`<!DOCTYPE html><html><head>
+          <meta http-equiv="refresh" content="30">
+          <title>Escanear QR — botwp</title>
+        </head><body style="font-family:sans-serif;text-align:center;padding:60px">
+          <h2>Escanea este QR con WhatsApp</h2>
+          <p>Abrí WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
+          <img src="${imgDataUrl}" style="margin:20px auto;display:block"/>
+          <p style="color:#888;font-size:13px">Esta página se actualiza sola cada 30 segundos</p>
+        </body></html>`);
+      } catch (err) {
+        res.end(`<p>Error generando QR: ${err.message}</p>`);
+      }
+      return;
+    }
+
+    res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
+      <h2>⏳ Arrancando bot...</h2><meta http-equiv="refresh" content="5">
+    </body></html>`);
+  });
+
+  server.listen(PORT, () => {
+    console.log(`[Server] Escuchando en puerto ${PORT}`);
+  });
+}
 
 async function procesarMensajes() {
   const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
@@ -36,6 +80,8 @@ async function procesarMensajes() {
 async function main() {
   console.log(`[Bot] Arrancando...`);
 
+  iniciarServidor();
+
   try {
     await conectar();
   } catch (err) {
@@ -44,7 +90,17 @@ async function main() {
   }
 
   try {
-    clienteWA = await iniciarCliente();
+    const cliente = await iniciarCliente({
+      onQR: (qr) => {
+        estadoWA = 'qr';
+        qrActual = qr;
+        console.log(`[WA] QR listo — visitá https://botwp-ikbb.onrender.com para escanearlo`);
+      },
+      onListo: () => {
+        estadoWA = 'conectado';
+        qrActual = null;
+      },
+    });
   } catch (err) {
     console.error(`[Bot] No se pudo inicializar WhatsApp:`, err.message);
     process.exit(1);

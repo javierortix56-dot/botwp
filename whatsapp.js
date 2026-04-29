@@ -5,7 +5,7 @@ require('dotenv').config();
 
 let client;
 
-function crearCliente() {
+function crearCliente(callbacks = {}) {
   client = new Client({
     authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }),
     puppeteer: {
@@ -15,13 +15,8 @@ function crearCliente() {
   });
 
   client.on('qr', (qr) => {
-    console.log(`[WA] Escanea el QR para iniciar sesión:`);
-    // qrcode-terminal es opcional; si no está instalado, copiar el string a https://www.qr-code-generator.com
-    try {
-      require('qrcode-terminal').generate(qr, { small: true });
-    } catch {
-      console.log(`[WA] QR string: ${qr}`);
-    }
+    console.log(`[WA] QR generado`);
+    if (callbacks.onQR) callbacks.onQR(qr);
   });
 
   client.on('authenticated', async (session) => {
@@ -37,6 +32,7 @@ function crearCliente() {
 
   client.on('ready', () => {
     console.log(`[WA] Cliente listo — escuchando mensajes`);
+    if (callbacks.onListo) callbacks.onListo();
   });
 
   client.on('disconnected', (reason) => {
@@ -74,8 +70,8 @@ function crearCliente() {
   return client;
 }
 
-async function iniciarCliente() {
-  crearCliente();
+async function iniciarCliente(callbacks = {}) {
+  crearCliente(callbacks);
   await client.initialize();
   return client;
 }
