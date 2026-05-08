@@ -1,3 +1,5 @@
+if (!globalThis.crypto) globalThis.crypto = require('crypto').webcrypto;
+
 const http = require('http');
 const cron = require('node-cron');
 const QRCode = require('qrcode');
