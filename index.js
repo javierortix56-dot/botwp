@@ -186,9 +186,7 @@ async function procesarMensajes() {
     const ids = mensajes.map((m) => m.id);
     await marcarProcesados(ids);
 
-    const urgentes = resultados.filter((r) => r.clasificacion === 'urgente').length;
-    const importantes = resultados.filter((r) => r.clasificacion === 'importante').length;
-    console.log(`[Cron] Ciclo completo — ${urgentes} urgentes, ${importantes} importantes, ${ids.length} marcados como procesados`);
+    console.log(`[Cron] Ciclo completo — ${resultados.length} temas, ${ids.length} mensajes procesados`);
   } catch (err) {
     console.error(`[Cron] Error en ciclo de análisis:`, err.message);
   }

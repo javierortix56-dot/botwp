@@ -7,26 +7,31 @@ const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
 
 const BATCH_SIZE = config.resumen.max_mensajes_por_batch;
 
-const PROMPT_SISTEMA = `Eres un asistente que clasifica mensajes de WhatsApp para su dueño.
-Para cada mensaje devuelves EXACTAMENTE uno de estos tres valores:
-- "urgente"    → requiere atención inmediata (emergencia, dinero, plazo hoy, problema crítico)
-- "importante" → hay que leerlo pronto pero no es emergencia
-- "ignorar"    → spam, saludos, memes, conversación intrascendente, felicitaciones de cumpleaños, stickers, audios de cortesía
+const PROMPT_SISTEMA = `Eres un asistente que resume conversaciones de WhatsApp para su dueño.
+
+Se te dan mensajes de distintos chats. Tu tarea es agruparlos por temática y devolver un resumen compacto de cada tema.
+
+Reglas:
+- Ignorá saludos, memes, stickers, audios de cortesía y spam — no los incluyas en el resumen
+- Agrupá mensajes relacionados bajo un mismo tema aunque vengan de chats distintos
+- El resumen de cada tema debe ser una oración clara que explique qué está pasando
+- Si hay algo que requiere acción o respuesta, indicalo en el resumen
 
 Responde SOLO con un array JSON, sin texto extra, con este formato:
-[{"id": <id>, "clasificacion": "<urgente|importante|ignorar>", "razon": "<una frase corta>", "tema": "<tema en 2-3 palabras>"}]`;
+[{"tema": "<tema en 2-4 palabras>", "resumen": "<una oración explicando qué pasa>", "chat": "<nombre del chat o chats>", "ids": [<id>, ...]}]
 
-async function clasificarBatch(mensajes) {
+Si todos los mensajes son irrelevantes (saludos, spam, etc.), devolvé un array vacío: []`;
+
+async function resumirBatch(mensajes) {
   const lista = mensajes
     .map((m) => `ID ${m.id} | De: ${m.remitente ?? m.remitente_id} | Chat: ${m.chat_nombre ?? m.chat_id}\nMensaje: ${m.cuerpo}`)
     .join('\n---\n');
 
-  const prompt = `${PROMPT_SISTEMA}\n\nMensajes a clasificar:\n${lista}`;
+  const prompt = `${PROMPT_SISTEMA}\n\nMensajes:\n${lista}`;
 
   const result = await model.generateContent(prompt);
   const texto = result.response.text().trim();
 
-  // Extraer el JSON aunque Gemini agregue markdown
   const match = texto.match(/\[[\s\S]*\]/);
   if (!match) throw new Error(`Respuesta inesperada de Gemini: ${texto.slice(0, 200)}`);
 
@@ -36,26 +41,25 @@ async function clasificarBatch(mensajes) {
 async function analizarMensajes(mensajes) {
   if (!mensajes.length) return [];
 
-  const resultados = [];
+  const temas = [];
 
   for (let i = 0; i < mensajes.length; i += BATCH_SIZE) {
     const batch = mensajes.slice(i, i + BATCH_SIZE);
     const numBatch = Math.floor(i / BATCH_SIZE) + 1;
     const totalBatches = Math.ceil(mensajes.length / BATCH_SIZE);
 
-    console.log(`[Gemini] Analizando batch ${numBatch}/${totalBatches} (${batch.length} mensajes)`);
+    console.log(`[Gemini] Resumiendo batch ${numBatch}/${totalBatches} (${batch.length} mensajes)`);
 
     try {
-      const clasificaciones = await clasificarBatch(batch);
-      resultados.push(...clasificaciones);
-      console.log(`[Gemini] Batch ${numBatch} OK — resultados: ${clasificaciones.map((c) => c.clasificacion).join(', ')}`);
+      const resultado = await resumirBatch(batch);
+      temas.push(...resultado);
+      console.log(`[Gemini] Batch ${numBatch} OK — ${resultado.length} temas encontrados`);
     } catch (err) {
       console.error(`[Gemini] Error en batch ${numBatch}:`, err.message);
-      batch.forEach((m) => resultados.push({ id: m.id, clasificacion: 'ignorar', razon: 'Error de análisis' }));
     }
   }
 
-  return resultados;
+  return temas;
 }
 
 module.exports = { analizarMensajes };
