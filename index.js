@@ -13,7 +13,7 @@ const http = require('http');
 const https = require('https');
 const cron = require('node-cron');
 const QRCode = require('qrcode');
-const { conectar, obtenerMensajesSinProcesar, marcarProcesados, guardarMensaje } = require('./db');
+const { conectar, obtenerMensajesSinProcesar, marcarProcesados, guardarMensaje, limpiarAuth } = require('./db');
 const { iniciarCliente, enviarResumen } = require('./whatsapp');
 const { analizarMensajes, analizarIndividuales } = require('./gemini');
 const config = require('./config.json');
@@ -75,48 +75,42 @@ function iniciarServidor() {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
 
     if (req.url === '/test' && req.method === 'GET') {
-      if (estadoWA !== 'conectado') {
-        res.end('<p>El bot no esta conectado aun.</p>');
-        return;
-      }
+      if (estadoWA !== 'conectado') { res.end('<p>El bot no esta conectado.</p>'); return; }
       try {
         await guardarMensaje({
-          chatId: 'test@c.us',
-          chatNombre: 'Chat de prueba',
-          remitente: 'Tester',
-          remitenteId: 'test@c.us',
-          cuerpo: 'Mensaje de prueba URGENTE - verifica que el bot funciona.',
-          timestamp: Math.floor(Date.now() / 1000),
-          esVip: false,
-          tieneKeyword: true,
+          chatId: 'test@c.us', chatNombre: 'Chat de prueba', remitente: 'Tester',
+          remitenteId: 'test@c.us', cuerpo: 'Mensaje de prueba URGENTE.',
+          timestamp: Math.floor(Date.now() / 1000), esVip: false, tieneKeyword: true,
         });
         await procesarMensajes();
-        res.end('<p>Prueba ejecutada. Revisa ntfy.</p><a href="/">Volver</a>');
-      } catch (err) {
-        res.end(`<p>Error: ${err.message}</p>`);
-      }
+        res.end('<p>Prueba ejecutada.</p><a href="/">Volver</a>');
+      } catch (err) { res.end(`<p>Error: ${err.message}</p>`); }
       return;
     }
 
     if (req.url === '/procesar' && req.method === 'GET') {
-      if (estadoWA !== 'conectado') {
-        res.end('<p>El bot no esta conectado.</p>');
-        return;
-      }
+      if (estadoWA !== 'conectado') { res.end('<p>El bot no esta conectado.</p>'); return; }
       try {
         await procesarMensajes();
-        res.end('<p>Analisis ejecutado. Revisa ntfy.</p><a href="/">Volver</a>');
-      } catch (err) {
-        res.end(`<p>Error: ${err.message}</p>`);
-      }
+        res.end('<p>Analisis ejecutado.</p><a href="/">Volver</a>');
+      } catch (err) { res.end(`<p>Error: ${err.message}</p>`); }
+      return;
+    }
+
+    if (req.url === '/limpiar-sesion' && req.method === 'GET') {
+      try {
+        await limpiarAuth();
+        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
+          <h2>Sesion borrada</h2>
+          <p>Reinicia el servicio en Render. Al arrancar te va a pedir el QR de nuevo.</p>
+          <p style="color:#888;font-size:.85rem">Despues de re-escanear, WhatsApp va a re-sincronizar el historial de los ultimos 15 dias.</p>
+        </body></html>`);
+      } catch (err) { res.end(`<p>Error: ${err.message}</p>`); }
       return;
     }
 
     if (req.url === '/historial' && req.method === 'GET') {
-      if (estadoWA !== 'conectado') {
-        res.end('<p>El bot no esta conectado.</p>');
-        return;
-      }
+      if (estadoWA !== 'conectado') { res.end('<p>El bot no esta conectado.</p>'); return; }
       try {
         const todos = await obtenerMensajesSinProcesar();
         const grupales = todos.filter((m) => m.chat_id?.endsWith('@g.us')).length;
@@ -125,13 +119,10 @@ function iniciarServidor() {
         res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
           <h2>Procesando historial</h2>
           <p>${todos.length} mensajes pendientes (${grupales} grupales, ${individuales} individuales)</p>
-          <p style="color:#888;font-size:.85rem">Esto puede tardar unos minutos. Vas a recibir las notificaciones en ntfy a medida que se procesen.</p>
-          <p style="color:#888;font-size:.8rem">Si no aparecen mensajes historicos, reinicia el servicio en Render para forzar otra sincronizacion con WhatsApp.</p>
+          <p style="color:#888;font-size:.85rem">Vas a recibir las notificaciones en ntfy a medida que se procesen.</p>
           <a href="/">Volver</a>
         </body></html>`);
-      } catch (err) {
-        res.end(`<p>Error: ${err.message}</p>`);
-      }
+      } catch (err) { res.end(`<p>Error: ${err.message}</p>`); }
       return;
     }
 
@@ -142,6 +133,7 @@ function iniciarServidor() {
         <p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none">Enviar mensaje de prueba</a></p>
         <p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none">Procesar mensajes nuevos</a></p>
         <p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none">Revisar historial completo (15 dias, leidos y no leidos)</a></p>
+        <p style="margin-top:24px"><a href="/limpiar-sesion" style="display:inline-block;margin:6px;padding:8px 20px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem" onclick="return confirm('Borrar sesion? Vas a tener que re-escanear el QR.')">Limpiar sesion y re-sincronizar historial</a></p>
       </body></html>`);
       return;
     }
@@ -155,71 +147,47 @@ function iniciarServidor() {
       try {
         const imgDataUrl = await QRCode.toDataURL(qrActual, { width: 280, margin: 2 });
         res.end(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="30"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="text-align:center;font-family:sans-serif;padding:40px"><h2>Escanea este QR desde WhatsApp</h2><img src="${imgDataUrl}" width="280"/></body></html>`);
-      } catch (err) {
-        res.end(`<p>Error generando QR: ${err.message}</p>`);
-      }
+      } catch (err) { res.end(`<p>Error generando QR: ${err.message}</p>`); }
       return;
     }
 
     res.end('<html><head><meta http-equiv="refresh" content="2"></head><body><p>Arrancando bot...</p></body></html>');
   });
 
-  server.listen(PORT, () => {
-    console.log(`[Server] Escuchando en puerto ${PORT}`);
-  });
+  server.listen(PORT, () => { console.log(`[Server] Escuchando en puerto ${PORT}`); });
 }
 
 async function procesarMensajesGrupos() {
   const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
   console.log(`\n[Cron grupos] Iniciando - ${hora}`);
-
   try {
     const todos = await obtenerMensajesSinProcesar();
     const grupales = todos.filter((m) => m.chat_id?.endsWith('@g.us'));
     console.log(`[Cron grupos] ${grupales.length} mensajes grupales sin procesar`);
-
-    if (!grupales.length) {
-      console.log(`[Cron grupos] Nada que analizar`);
-      return;
-    }
-
+    if (!grupales.length) { console.log(`[Cron grupos] Nada que analizar`); return; }
     const resultados = await analizarMensajes(grupales);
     await enviarResumen(grupales, resultados);
     notificarNtfy(resultados);
-
     const ids = grupales.map((m) => m.id);
     await marcarProcesados(ids);
-
     console.log(`[Cron grupos] Completo - ${resultados.length} temas, ${ids.length} mensajes procesados`);
-  } catch (err) {
-    console.error(`[Cron grupos] Error:`, err.message);
-  }
+  } catch (err) { console.error(`[Cron grupos] Error:`, err.message); }
 }
 
 async function procesarMensajesIndividuales() {
   const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
   console.log(`\n[Cron individuales] Iniciando - ${hora}`);
-
   try {
     const todos = await obtenerMensajesSinProcesar();
     const individuales = todos.filter((m) => !m.chat_id?.endsWith('@g.us'));
     console.log(`[Cron individuales] ${individuales.length} mensajes individuales sin procesar`);
-
-    if (!individuales.length) {
-      console.log(`[Cron individuales] Nada que analizar`);
-      return;
-    }
-
+    if (!individuales.length) { console.log(`[Cron individuales] Nada que analizar`); return; }
     const { eventos, asuntos } = await analizarIndividuales(individuales);
     notificarCalendario(eventos, asuntos);
-
     const ids = individuales.map((m) => m.id);
     await marcarProcesados(ids);
-
     console.log(`[Cron individuales] Completo - ${eventos.length} eventos, ${asuntos.length} asuntos, ${ids.length} mensajes procesados`);
-  } catch (err) {
-    console.error(`[Cron individuales] Error:`, err.message);
-  }
+  } catch (err) { console.error(`[Cron individuales] Error:`, err.message); }
 }
 
 async function procesarMensajes() {
@@ -229,50 +197,18 @@ async function procesarMensajes() {
 
 async function main() {
   console.log(`[Bot] Arrancando...`);
-
   iniciarServidor();
-
-  try {
-    await conectar();
-  } catch (err) {
-    console.error(`[Bot] No se pudo conectar a Turso:`, err.message);
-    process.exit(1);
-  }
-
+  try { await conectar(); } catch (err) { console.error(`[Bot] No se pudo conectar a Turso:`, err.message); process.exit(1); }
   try {
     await iniciarCliente({
-      onQR: (qr) => {
-        estadoWA = 'qr';
-        qrActual = qr;
-        tsAutenticando = null;
-        console.log(`[WA] QR listo`);
-      },
-      onAutenticando: () => {
-        estadoWA = 'autenticando';
-        qrActual = null;
-        tsAutenticando = Date.now();
-        console.log(`[WA] Autenticando...`);
-      },
-      onListo: () => {
-        const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : '?';
-        estadoWA = 'conectado';
-        qrActual = null;
-        console.log(`[WA] Listo en ${segs}s`);
-      },
+      onQR: (qr) => { estadoWA = 'qr'; qrActual = qr; tsAutenticando = null; console.log(`[WA] QR listo`); },
+      onAutenticando: () => { estadoWA = 'autenticando'; qrActual = null; tsAutenticando = Date.now(); console.log(`[WA] Autenticando...`); },
+      onListo: () => { const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : '?'; estadoWA = 'conectado'; qrActual = null; console.log(`[WA] Listo en ${segs}s`); },
     });
-  } catch (err) {
-    console.error(`[Bot] No se pudo inicializar WhatsApp:`, err.message);
-    process.exit(1);
-  }
-
-  cron.schedule(config.resumen.hora_cron_grupos, procesarMensajesGrupos, {
-    timezone: 'America/Argentina/Buenos_Aires',
-  });
-  cron.schedule(config.resumen.hora_cron_individuales, procesarMensajesIndividuales, {
-    timezone: 'America/Argentina/Buenos_Aires',
-  });
-
-  console.log(`[Bot] Crones activos - grupos "${config.resumen.hora_cron_grupos}", individuales "${config.resumen.hora_cron_individuales}"`);
+  } catch (err) { console.error(`[Bot] No se pudo inicializar WhatsApp:`, err.message); process.exit(1); }
+  cron.schedule(config.resumen.hora_cron_grupos, procesarMensajesGrupos, { timezone: 'America/Argentina/Buenos_Aires' });
+  cron.schedule(config.resumen.hora_cron_individuales, procesarMensajesIndividuales, { timezone: 'America/Argentina/Buenos_Aires' });
+  console.log(`[Bot] Crones activos`);
 }
 
 main();
