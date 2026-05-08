@@ -20,8 +20,11 @@
     "llámame"
   ],
   "grupo_resumen": "",
+  "monitorear_individuales": true,
+  "dias_historial": 15,
   "resumen": {
-    "hora_cron": "0 12,20 * * *",
+    "hora_cron_grupos": "0 12,20 * * *",
+    "hora_cron_individuales": "0 22 * * *",
     "max_mensajes_por_batch": 5
   }
 }

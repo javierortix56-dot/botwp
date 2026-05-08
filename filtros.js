@@ -19,16 +19,17 @@ function tieneKeyword(cuerpo) {
   return keywords.some((k) => texto.includes(k));
 }
 
-/**
- * Devuelve true si el mensaje debe enviarse a Gemini para análisis.
- * Un mensaje califica si viene de un VIP, de un grupo monitoreado, o contiene keyword.
- */
+function esIndividual(chatId) {
+  return chatId && !chatId.endsWith('@g.us');
+}
+
 function debeAnalizarse(msg) {
   try {
     const vip = esVip(msg.remitenteId);
     const grupo = esGrupoMonitoreado(msg.chatNombre);
     const keyword = tieneKeyword(msg.cuerpo);
-    return vip || grupo || keyword;
+    const individual = config.monitorear_individuales && esIndividual(msg.chatId);
+    return vip || grupo || keyword || individual;
   } catch (err) {
     console.error(`[Filtros] Error evaluando mensaje:`, err.message);
     return false;
@@ -42,4 +43,4 @@ function obtenerFlags(msg) {
   };
 }
 
-module.exports = { debeAnalizarse, obtenerFlags, esVip, esGrupoMonitoreado, tieneKeyword };
+module.exports = { debeAnalizarse, obtenerFlags, esVip, esGrupoMonitoreado, tieneKeyword, esIndividual };
