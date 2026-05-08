@@ -1,5 +1,14 @@
 global.crypto = require('crypto').webcrypto;
 
+require('dotenv').config();
+
+const REQUIRED_ENV = ['GEMINI_API_KEY', 'TURSO_URL', 'TURSO_TOKEN', 'MY_WHATSAPP_ID'];
+const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
+if (missing.length) {
+  console.error(`[Bot] Faltan variables de entorno: ${missing.join(', ')}`);
+  process.exit(1);
+}
+
 const http = require('http');
 const cron = require('node-cron');
 const QRCode = require('qrcode');
