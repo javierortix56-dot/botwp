@@ -190,6 +190,16 @@ async function enviarResumen(mensajes, temas) {
   const texto = lineas.join('\n');
   const destino = await resolverDestino();
 
+  // Para grupos, obtener metadata antes de enviar fuerza la distribución de claves de cifrado
+  if (destino.endsWith('@g.us')) {
+    try {
+      await sock.groupMetadata(destino);
+    } catch {
+      // ignorar — el send igual puede funcionar
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+
   try {
     await sock.sendMessage(destino, { text: texto });
     console.log(`[WA] Resumen enviado a ${destino} — ${temas.length} temas`);
