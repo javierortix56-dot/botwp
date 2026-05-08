@@ -152,6 +152,8 @@ async function resolverDestino() {
   if (nombreGrupo && sock) {
     try {
       const grupos = await sock.groupFetchAllParticipating();
+      const nombresDisponibles = Object.values(grupos).map((g) => g.subject);
+      console.log(`[WA] Grupos disponibles: ${nombresDisponibles.join(', ') || '(ninguno)'}`);
       const entrada = Object.entries(grupos).find(
         ([, g]) => g.subject?.toLowerCase().trim() === nombreGrupo.toLowerCase().trim()
       );
@@ -164,7 +166,9 @@ async function resolverDestino() {
       console.warn(`[WA] Error buscando grupo destino:`, err.message);
     }
   }
-  return normalizarJid(process.env.MY_WHATSAPP_ID);
+  const destino = normalizarJid(process.env.MY_WHATSAPP_ID);
+  console.log(`[WA] Destino resumen: ${destino}`);
+  return destino;
 }
 
 async function enviarResumen(mensajes, temas) {
