@@ -1,4 +1,5 @@
 const { createClient } = require('@libsql/client');
+const { initAuthCreds, BufferJSON, proto } = require('@whiskeysockets/baileys');
 require('dotenv').config();
 
 let db;
@@ -24,10 +25,10 @@ async function conectar() {
       creado_en   INTEGER DEFAULT (unixepoch())
     );
 
-    CREATE TABLE IF NOT EXISTS sesion_wa (
-      id             TEXT PRIMARY KEY,
-      data           TEXT NOT NULL,
-      actualizado_en INTEGER DEFAULT (unixepoch())
+    CREATE TABLE IF NOT EXISTS wa_auth (
+      key        TEXT PRIMARY KEY,
+      value      TEXT NOT NULL,
+      updated_at INTEGER DEFAULT (unixepoch())
     );
   `);
 
@@ -71,38 +72,80 @@ async function marcarProcesados(ids) {
   }
 }
 
-async function guardarSesion(id, data) {
-  try {
+// Auth state para Baileys persistido en Turso.
+// Permite que la sesión sobreviva reinicios del contenedor sin re-escanear QR.
+async function useTursoAuthState() {
+  const writeData = async (key, value) => {
     await db.execute({
-      sql: `INSERT INTO sesion_wa (id, data, actualizado_en)
-            VALUES (?, ?, unixepoch())
-            ON CONFLICT(id) DO UPDATE SET data = excluded.data, actualizado_en = unixepoch()`,
-      args: [id, data],
+      sql: `INSERT INTO wa_auth (key, value, updated_at) VALUES (?, ?, unixepoch())
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()`,
+      args: [key, JSON.stringify(value, BufferJSON.replacer)],
     });
-  } catch (err) {
-    console.error(`[DB] Error al guardar sesión WA:`, err.message);
-  }
-}
+  };
 
-async function obtenerSesion(id) {
-  try {
+  const readData = async (key) => {
     const result = await db.execute({
-      sql: `SELECT data FROM sesion_wa WHERE id = ?`,
-      args: [id],
+      sql: `SELECT value FROM wa_auth WHERE key = ?`,
+      args: [key],
     });
-    return result.rows[0]?.data ?? null;
-  } catch (err) {
-    console.error(`[DB] Error al leer sesión WA:`, err.message);
-    return null;
-  }
+    if (!result.rows[0]) return null;
+    return JSON.parse(result.rows[0].value, BufferJSON.reviver);
+  };
+
+  const removeData = async (key) => {
+    await db.execute({ sql: `DELETE FROM wa_auth WHERE key = ?`, args: [key] });
+  };
+
+  const creds = (await readData('creds')) || initAuthCreds();
+
+  return {
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const data = {};
+          await Promise.all(ids.map(async (id) => {
+            let value = await readData(`${type}-${id}`);
+            if (value && type === 'app-state-sync-key') {
+              value = proto.Message.AppStateSyncKeyData.fromObject(value);
+            }
+            if (value) data[id] = value;
+          }));
+          return data;
+        },
+        set: async (data) => {
+          const tasks = [];
+          for (const category in data) {
+            for (const id in data[category]) {
+              const value = data[category][id];
+              const key = `${category}-${id}`;
+              tasks.push(value ? writeData(key, value) : removeData(key));
+            }
+          }
+          await Promise.all(tasks);
+        },
+      },
+    },
+    saveCreds: async () => {
+      await writeData('creds', creds);
+    },
+  };
 }
 
-async function eliminarSesion(id) {
+async function limpiarAuth() {
   try {
-    await db.execute({ sql: `DELETE FROM sesion_wa WHERE id = ?`, args: [id] });
+    await db.execute(`DELETE FROM wa_auth`);
+    console.log(`[DB] Auth state borrado — próximo arranque pedirá QR`);
   } catch (err) {
-    console.error(`[DB] Error al eliminar sesión WA:`, err.message);
+    console.error(`[DB] Error al limpiar auth:`, err.message);
   }
 }
 
-module.exports = { conectar, guardarMensaje, obtenerMensajesSinProcesar, marcarProcesados, guardarSesion, obtenerSesion, eliminarSesion };
+module.exports = {
+  conectar,
+  guardarMensaje,
+  obtenerMensajesSinProcesar,
+  marcarProcesados,
+  useTursoAuthState,
+  limpiarAuth,
+};
