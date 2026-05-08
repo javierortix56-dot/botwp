@@ -83,6 +83,12 @@ async function iniciarCliente(callbacks = {}) {
         return;
       }
 
+      // 440 = otra instancia tomó la sesión (deploy solapado). Ceder sin pelear.
+      if (code === 440) {
+        console.warn(`[WA] Conflicto de sesión — otra instancia activa, esta se retira`);
+        return;
+      }
+
       console.log(`[WA] Reintentando conexión en 3s...`);
       setTimeout(() => {
         iniciarCliente(callbacks).catch((err) =>
