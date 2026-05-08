@@ -1,98 +1,149 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const { guardarMensaje } = require('./db');
+const {
+  default: makeWASocket,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+} = require('@whiskeysockets/baileys');
+const pino = require('pino');
+const { guardarMensaje, useTursoAuthState } = require('./db');
 const { debeAnalizarse, obtenerFlags } = require('./filtros');
 require('dotenv').config();
 
-let client;
+const logger = pino({ level: 'silent' });
 
-function crearCliente(callbacks = {}) {
-  client = new Client({
-    authStrategy: new LocalAuth({ dataPath: '/tmp/.wwebjs_auth' }),
-    authTimeoutMs: 0, // sin timeout — Render puede tardar en cargar WhatsApp Web
-    puppeteer: {
-      headless: true,
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--single-process',
-        '--no-zygote',
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-accelerated-2d-canvas',
-        '--disable-canvas-aa',
-        '--mute-audio',
-      ],
-    },
-  });
+let sock;
+let listo = false;
 
-  client.on('qr', (qr) => {
-    console.log(`[WA] QR generado`);
-    if (callbacks.onQR) callbacks.onQR(qr);
-  });
+function normalizarJid(jid) {
+  if (!jid) return jid;
+  // whatsapp-web.js usa @c.us, Baileys usa @s.whatsapp.net
+  return jid.replace('@c.us', '@s.whatsapp.net');
+}
 
-  client.on('loading_screen', (percent, message) => {
-    console.log(`[WA] Cargando WhatsApp Web: ${percent}% — ${message}`);
-  });
-
-  client.on('authenticated', () => {
-    console.log(`[WA] Evento authenticated — cargando WhatsApp Web en el navegador...`);
-    if (callbacks.onAutenticando) callbacks.onAutenticando();
-  });
-
-  client.on('auth_failure', (msg) => {
-    console.error(`[WA] Fallo de autenticación:`, msg);
-  });
-
-  client.on('ready', () => {
-    console.log(`[WA] Cliente listo — escuchando mensajes`);
-    if (callbacks.onListo) callbacks.onListo();
-  });
-
-  client.on('disconnected', (reason) => {
-    console.warn(`[WA] Desconectado: ${reason}`);
-  });
-
-  client.on('message', async (msg) => {
-    try {
-      if (msg.fromMe || msg.isStatus || !msg.body) return;
-
-      const chat = await msg.getChat();
-      const contact = await msg.getContact();
-
-      const msgData = {
-        chatId: msg.from,
-        chatNombre: chat.name ?? null,
-        remitente: contact.pushname ?? contact.name ?? null,
-        remitenteId: msg.from,
-        cuerpo: msg.body,
-        timestamp: msg.timestamp,
-      };
-
-      if (!debeAnalizarse(msgData)) return;
-
-      const { esVip, tieneKeyword } = obtenerFlags(msgData);
-      await guardarMensaje({ ...msgData, esVip, tieneKeyword });
-
-      console.log(`[WA] Mensaje guardado — Chat: ${msgData.chatNombre ?? msgData.chatId} | VIP: ${esVip} | Keyword: ${tieneKeyword}`);
-    } catch (err) {
-      console.error(`[WA] Error procesando mensaje entrante:`, err.message);
-    }
-  });
-
-  return client;
+function extraerCuerpo(message) {
+  if (!message) return '';
+  return (
+    message.conversation ||
+    message.extendedTextMessage?.text ||
+    message.imageMessage?.caption ||
+    message.videoMessage?.caption ||
+    message.documentMessage?.caption ||
+    ''
+  );
 }
 
 async function iniciarCliente(callbacks = {}) {
-  crearCliente(callbacks);
-  await client.initialize();
-  return client;
+  const { state, saveCreds } = await useTursoAuthState();
+  const { version } = await fetchLatestBaileysVersion();
+  console.log(`[WA] Usando WhatsApp Web v${version.join('.')}`);
+
+  sock = makeWASocket({
+    version,
+    auth: state,
+    logger,
+    printQRInTerminal: false,
+    browser: ['BotWP', 'Chrome', '1.0'],
+    syncFullHistory: false,
+    markOnlineOnConnect: false,
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      console.log(`[WA] QR generado`);
+      if (callbacks.onQR) callbacks.onQR(qr);
+    }
+
+    if (connection === 'connecting') {
+      console.log(`[WA] Conectando con WhatsApp...`);
+      if (callbacks.onAutenticando) callbacks.onAutenticando();
+    }
+
+    if (connection === 'open') {
+      listo = true;
+      console.log(`[WA] Cliente listo — escuchando mensajes`);
+      if (callbacks.onListo) callbacks.onListo();
+    }
+
+    if (connection === 'close') {
+      listo = false;
+      const code = lastDisconnect?.error?.output?.statusCode;
+      const motivo = lastDisconnect?.error?.message ?? 'desconocido';
+      console.warn(`[WA] Desconectado (${code}): ${motivo}`);
+
+      if (code === DisconnectReason.loggedOut) {
+        console.error(`[WA] Sesión cerrada — necesitás escanear QR de nuevo`);
+        // El próximo iniciarCliente generará un QR nuevo
+        try {
+          await iniciarCliente(callbacks);
+        } catch (err) {
+          console.error(`[WA] Error reintentando:`, err.message);
+        }
+        return;
+      }
+
+      console.log(`[WA] Reintentando conexión en 3s...`);
+      setTimeout(() => {
+        iniciarCliente(callbacks).catch((err) =>
+          console.error(`[WA] Error reintentando:`, err.message)
+        );
+      }, 3000);
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+    for (const msg of messages) {
+      try {
+        if (msg.key.fromMe || !msg.message) continue;
+
+        const cuerpo = extraerCuerpo(msg.message);
+        if (!cuerpo) continue;
+
+        const chatId = msg.key.remoteJid;
+        const remitenteId = msg.key.participant || chatId;
+        const remitente = msg.pushName ?? null;
+
+        let chatNombre = remitente;
+        if (chatId.endsWith('@g.us')) {
+          try {
+            const meta = await sock.groupMetadata(chatId);
+            chatNombre = meta.subject;
+          } catch {
+            chatNombre = null;
+          }
+        }
+
+        const msgData = {
+          chatId,
+          chatNombre,
+          remitente,
+          remitenteId,
+          cuerpo,
+          timestamp: Number(msg.messageTimestamp),
+        };
+
+        if (!debeAnalizarse(msgData)) continue;
+
+        const { esVip, tieneKeyword } = obtenerFlags(msgData);
+        await guardarMensaje({ ...msgData, esVip, tieneKeyword });
+
+        console.log(
+          `[WA] Mensaje guardado — Chat: ${chatNombre ?? chatId} | VIP: ${esVip} | Keyword: ${tieneKeyword}`
+        );
+      } catch (err) {
+        console.error(`[WA] Error procesando mensaje entrante:`, err.message);
+      }
+    }
+  });
+
+  return sock;
 }
 
 async function enviarResumen(mensajes, resultados) {
-  if (!client) throw new Error('Cliente WA no inicializado');
+  if (!sock || !listo) throw new Error('Cliente WA no inicializado');
   if (!resultados.length) return;
 
   const urgentes = resultados.filter((r) => r.clasificacion === 'urgente');
@@ -124,9 +175,10 @@ async function enviarResumen(mensajes, resultados) {
   }
 
   const texto = lineas.join('\n');
+  const destino = normalizarJid(process.env.MY_WHATSAPP_ID);
 
   try {
-    await client.sendMessage(process.env.MY_WHATSAPP_ID, texto);
+    await sock.sendMessage(destino, { text: texto });
     console.log(`[WA] Resumen enviado — ${urgentes.length} urgentes, ${importantes.length} importantes`);
   } catch (err) {
     console.error(`[WA] Error enviando resumen:`, err.message);

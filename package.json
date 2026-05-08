@@ -9,9 +9,10 @@
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
     "@libsql/client": "^0.14.0",
+    "@whiskeysockets/baileys": "^6.7.9",
     "dotenv": "^16.4.7",
     "node-cron": "^3.0.3",
-    "qrcode": "^1.5.4",
-    "whatsapp-web.js": "^1.26.0"
+    "pino": "^9.5.0",
+    "qrcode": "^1.5.4"
   }
 }
