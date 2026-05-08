@@ -3,7 +3,7 @@ const config = require('./config.json');
 require('dotenv').config();
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-lite' });
 
 const BATCH_SIZE = config.resumen.max_mensajes_por_batch;
 
