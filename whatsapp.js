@@ -42,11 +42,54 @@ async function iniciarCliente(callbacks = {}) {
     logger,
     printQRInTerminal: false,
     browser: ['BotWP', 'Chrome', '1.0'],
-    syncFullHistory: false,
+    syncFullHistory: true,
     markOnlineOnConnect: false,
   });
 
   sock.ev.on('creds.update', saveCreds);
+
+  // Backfill: cuando WhatsApp sincroniza historial, guardamos mensajes recientes
+  // para el resumen diario.
+  sock.ev.on('messaging-history.set', async ({ messages }) => {
+    if (!messages?.length) return;
+    const dias = config.dias_historial ?? 15;
+    const limiteTimestamp = Math.floor(Date.now() / 1000) - dias * 86400;
+    let guardados = 0;
+    for (const msg of messages) {
+      try {
+        if (msg.key.fromMe || !msg.message) continue;
+        const ts = Number(msg.messageTimestamp);
+        if (ts < limiteTimestamp) continue;
+
+        const cuerpo = extraerCuerpo(msg.message);
+        if (!cuerpo) continue;
+
+        const chatId = msg.key.remoteJid;
+        const remitenteId = msg.key.participant || chatId;
+        const remitente = msg.pushName ?? null;
+
+        const msgData = {
+          chatId,
+          chatNombre: remitente,
+          remitente,
+          remitenteId,
+          cuerpo,
+          timestamp: ts,
+        };
+
+        if (!debeAnalizarse(msgData)) continue;
+
+        const { esVip, tieneKeyword } = obtenerFlags(msgData);
+        await guardarMensaje({ ...msgData, esVip, tieneKeyword });
+        guardados++;
+      } catch (err) {
+        console.error(`[WA] Error en backfill:`, err.message);
+      }
+    }
+    if (guardados > 0) {
+      console.log(`[WA] Backfill: ${guardados} mensajes históricos guardados (últimos ${dias} días)`);
+    }
+  });
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
@@ -83,7 +126,6 @@ async function iniciarCliente(callbacks = {}) {
         return;
       }
 
-      // 440 = otra instancia tomó la sesión (deploy solapado). Ceder sin pelear.
       if (code === 440) {
         console.warn(`[WA] Conflicto de sesión — otra instancia activa, esta se retira`);
         return;
@@ -152,23 +194,15 @@ async function resolverDestino() {
   if (nombreGrupo && sock) {
     try {
       const grupos = await sock.groupFetchAllParticipating();
-      const nombresDisponibles = Object.values(grupos).map((g) => g.subject);
-      console.log(`[WA] Grupos disponibles: ${nombresDisponibles.join(', ') || '(ninguno)'}`);
       const entrada = Object.entries(grupos).find(
         ([, g]) => g.subject?.toLowerCase().trim() === nombreGrupo.toLowerCase().trim()
       );
-      if (entrada) {
-        console.log(`[WA] Destino resumen: grupo "${nombreGrupo}" (${entrada[0]})`);
-        return entrada[0];
-      }
-      console.warn(`[WA] Grupo "${nombreGrupo}" no encontrado — usando MY_WHATSAPP_ID`);
+      if (entrada) return entrada[0];
     } catch (err) {
       console.warn(`[WA] Error buscando grupo destino:`, err.message);
     }
   }
-  const destino = normalizarJid(process.env.MY_WHATSAPP_ID);
-  console.log(`[WA] Destino resumen: ${destino}`);
-  return destino;
+  return normalizarJid(process.env.MY_WHATSAPP_ID);
 }
 
 async function enviarResumen(mensajes, temas) {
@@ -190,13 +224,10 @@ async function enviarResumen(mensajes, temas) {
   const texto = lineas.join('\n');
   const destino = await resolverDestino();
 
-  // Para grupos, obtener metadata antes de enviar fuerza la distribución de claves de cifrado
   if (destino.endsWith('@g.us')) {
     try {
       await sock.groupMetadata(destino);
-    } catch {
-      // ignorar — el send igual puede funcionar
-    }
+    } catch {}
     await new Promise((r) => setTimeout(r, 1000));
   }
 
