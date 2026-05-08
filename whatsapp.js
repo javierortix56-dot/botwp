@@ -147,56 +147,28 @@ async function iniciarCliente(callbacks = {}) {
   return sock;
 }
 
-async function enviarResumen(mensajes, resultados) {
+async function enviarResumen(mensajes, temas) {
   if (!sock || !listo) throw new Error('Cliente WA no inicializado');
-  if (!resultados.length) return;
-
-  const urgentes = resultados.filter((r) => r.clasificacion === 'urgente');
-  const importantes = resultados.filter((r) => r.clasificacion === 'importante');
-
-  if (!urgentes.length && !importantes.length) {
-    console.log(`[WA] Sin mensajes urgentes o importantes — resumen omitido`);
+  if (!temas.length) {
+    console.log(`[WA] Sin temas relevantes — resumen omitido`);
     return;
   }
 
   const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-  const lineas = [`*Resumen ${hora}*\n`];
+  const lineas = [`📋 *Resumen ${hora}*\n`];
 
-  function agruparPorTema(lista) {
-    const temas = {};
-    lista.forEach((r) => {
-      const tema = r.tema ?? 'General';
-      if (!temas[tema]) temas[tema] = [];
-      temas[tema].push(r);
-    });
-    return temas;
-  }
-
-  function renderTemas(lista) {
-    const temas = agruparPorTema(lista);
-    Object.entries(temas).forEach(([tema, items]) => {
-      const sufijo = items.length > 1 ? ` _(${items.length} mensajes)_` : '';
-      lineas.push(`• *${tema}*${sufijo}: ${items[0].razon}`);
-    });
-  }
-
-  if (urgentes.length) {
-    lineas.push(`🔴 *URGENTE*`);
-    renderTemas(urgentes);
-    lineas.push('');
-  }
-
-  if (importantes.length) {
-    lineas.push(`🟡 *IMPORTANTE*`);
-    renderTemas(importantes);
-  }
+  temas.forEach((t) => {
+    const cantMensajes = t.ids?.length > 1 ? ` _(${t.ids.length} mensajes)_` : '';
+    lineas.push(`• *${t.tema}*${cantMensajes} — ${t.chat}`);
+    lineas.push(`  ${t.resumen}`);
+  });
 
   const texto = lineas.join('\n');
   const destino = normalizarJid(process.env.MY_WHATSAPP_ID);
 
   try {
     await sock.sendMessage(destino, { text: texto });
-    console.log(`[WA] Resumen enviado — ${urgentes.length} urgentes, ${importantes.length} importantes`);
+    console.log(`[WA] Resumen enviado — ${temas.length} temas`);
   } catch (err) {
     console.error(`[WA] Error enviando resumen:`, err.message);
   }
