@@ -18,7 +18,7 @@
     "llamame",
     "llámame"
   ],
-  "grupo_resumen": "Resumen",
+  "grupo_resumen": "",
   "resumen": {
     "hora_cron": "0 12,20 * * *",
     "max_mensajes_por_batch": 5
