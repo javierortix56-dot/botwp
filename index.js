@@ -2,7 +2,7 @@ global.crypto = require('crypto').webcrypto;
 
 require('dotenv').config();
 
-const REQUIRED_ENV = ['GEMINI_API_KEY', 'TURSO_URL', 'TURSO_TOKEN', 'MY_WHATSAPP_ID'];
+const REQUIRED_ENV = ['GEMINI_API_KEY', 'TURSO_URL', 'TURSO_TOKEN', 'MY_WHATSAPP_ID', 'NTFY_TOPIC'];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
 if (missing.length) {
   console.error(`[Bot] Faltan variables de entorno: ${missing.join(', ')}`);
@@ -10,6 +10,7 @@ if (missing.length) {
 }
 
 const http = require('http');
+const https = require('https');
 const cron = require('node-cron');
 const QRCode = require('qrcode');
 const { conectar, obtenerMensajesSinProcesar, marcarProcesados, guardarMensaje } = require('./db');
@@ -18,6 +19,26 @@ const { analizarMensajes } = require('./gemini');
 const config = require('./config.json');
 
 const PORT = process.env.PORT || 3000;
+
+function notificarNtfy(temas) {
+  if (!process.env.NTFY_TOPIC || !temas.length) return;
+  const resumen = temas.map((t) => `• ${t.tema}: ${t.resumen}`).join('\n');
+  const body = Buffer.from(resumen);
+  const req = https.request({
+    hostname: 'ntfy.sh',
+    path: `/${process.env.NTFY_TOPIC}`,
+    method: 'POST',
+    headers: {
+      'Title': `Resumen WhatsApp — ${temas.length} tema${temas.length > 1 ? 's' : ''}`,
+      'Priority': 'high',
+      'Content-Type': 'text/plain',
+      'Content-Length': body.length,
+    },
+  });
+  req.on('error', (err) => console.error(`[ntfy] Error enviando notificación:`, err.message));
+  req.write(body);
+  req.end();
+}
 
 let estadoWA = 'arrancando';
 let qrActual = null;
@@ -42,7 +63,7 @@ function iniciarServidor() {
           chatNombre: 'Chat de prueba',
           remitente: 'Tester',
           remitenteId: 'test@c.us',
-          cuerpo: 'Este es un mensaje de prueba URGENTE — verific&#225; que el bot funciona correctamente.',
+          cuerpo: 'Este es un mensaje de prueba URGENTE &#8212; verific&#225; que el bot funciona correctamente.',
           timestamp: Math.floor(Date.now() / 1000),
           esVip: false,
           tieneKeyword: true,
@@ -207,6 +228,7 @@ async function procesarMensajes() {
 
     const resultados = await analizarMensajes(mensajes);
     await enviarResumen(mensajes, resultados);
+    notificarNtfy(resultados);
 
     const ids = mensajes.map((m) => m.id);
     await marcarProcesados(ids);
@@ -235,7 +257,7 @@ async function main() {
         estadoWA = 'qr';
         qrActual = qr;
         tsAutenticando = null;
-        console.log(`[WA] QR listo — visitá https://botwp-ikbb.onrender.com para escanearlo`);
+        console.log(`[WA] QR listo — visitá https://botwp-nivv.onrender.com para escanearlo`);
       },
       onAutenticando: () => {
         estadoWA = 'autenticando';

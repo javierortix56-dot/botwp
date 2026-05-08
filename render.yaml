@@ -13,3 +13,5 @@ services:
         sync: false
       - key: MY_WHATSAPP_ID
         sync: false
+      - key: NTFY_TOPIC
+        sync: false
