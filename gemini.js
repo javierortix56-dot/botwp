@@ -3,7 +3,7 @@ const config = require('./config.json');
 require('dotenv').config();
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
 
 const BATCH_SIZE = config.resumen.max_mensajes_por_batch;
 
@@ -51,7 +51,6 @@ async function analizarMensajes(mensajes) {
       console.log(`[Gemini] Batch ${numBatch} OK — resultados: ${clasificaciones.map((c) => c.clasificacion).join(', ')}`);
     } catch (err) {
       console.error(`[Gemini] Error en batch ${numBatch}:`, err.message);
-      // Si un batch falla, marcar todos sus mensajes como "ignorar" para no bloquear el flujo
       batch.forEach((m) => resultados.push({ id: m.id, clasificacion: 'ignorar', razon: 'Error de análisis' }));
     }
   }
