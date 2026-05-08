@@ -155,22 +155,40 @@ async function enviarResumen(mensajes, resultados) {
   }
 
   const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-  const lineas = [`*Resumen ${hora}* — ${resultados.length} mensajes analizados\n`];
+  const lineas = [`*Resumen ${hora}*\n`];
+
+  function agruparPorTema(lista) {
+    const temas = {};
+    lista.forEach((r) => {
+      const tema = r.tema ?? 'General';
+      if (!temas[tema]) temas[tema] = [];
+      temas[tema].push(r);
+    });
+    return temas;
+  }
 
   if (urgentes.length) {
-    lineas.push(`🔴 *URGENTES (${urgentes.length})*`);
-    urgentes.forEach((r) => {
-      const msg = mensajes.find((m) => m.id === r.id);
-      if (msg) lineas.push(`• [${msg.chat_nombre ?? msg.chat_id}] ${msg.remitente ?? ''}: ${msg.cuerpo.slice(0, 80)} — _${r.razon}_`);
+    lineas.push(`🔴 *URGENTE*`);
+    const temas = agruparPorTema(urgentes);
+    Object.entries(temas).forEach(([tema, items]) => {
+      lineas.push(`*${tema}*`);
+      items.forEach((r) => {
+        const msg = mensajes.find((m) => m.id === r.id);
+        if (msg) lineas.push(`  • ${r.razon}`);
+      });
     });
     lineas.push('');
   }
 
   if (importantes.length) {
-    lineas.push(`🟡 *IMPORTANTES (${importantes.length})*`);
-    importantes.forEach((r) => {
-      const msg = mensajes.find((m) => m.id === r.id);
-      if (msg) lineas.push(`• [${msg.chat_nombre ?? msg.chat_id}] ${msg.remitente ?? ''}: ${msg.cuerpo.slice(0, 80)} — _${r.razon}_`);
+    lineas.push(`🟡 *IMPORTANTE*`);
+    const temas = agruparPorTema(importantes);
+    Object.entries(temas).forEach(([tema, items]) => {
+      lineas.push(`*${tema}*`);
+      items.forEach((r) => {
+        const msg = mensajes.find((m) => m.id === r.id);
+        if (msg) lineas.push(`  • ${r.razon}`);
+      });
     });
   }
 
