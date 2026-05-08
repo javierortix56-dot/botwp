@@ -75,7 +75,6 @@ async function iniciarCliente(callbacks = {}) {
 
       if (code === DisconnectReason.loggedOut) {
         console.error(`[WA] Sesión cerrada — necesitás escanear QR de nuevo`);
-        // El próximo iniciarCliente generará un QR nuevo
         try {
           await iniciarCliente(callbacks);
         } catch (err) {
@@ -167,29 +166,23 @@ async function enviarResumen(mensajes, resultados) {
     return temas;
   }
 
+  function renderTemas(lista) {
+    const temas = agruparPorTema(lista);
+    Object.entries(temas).forEach(([tema, items]) => {
+      const sufijo = items.length > 1 ? ` _(${items.length} mensajes)_` : '';
+      lineas.push(`• *${tema}*${sufijo}: ${items[0].razon}`);
+    });
+  }
+
   if (urgentes.length) {
     lineas.push(`🔴 *URGENTE*`);
-    const temas = agruparPorTema(urgentes);
-    Object.entries(temas).forEach(([tema, items]) => {
-      lineas.push(`*${tema}*`);
-      items.forEach((r) => {
-        const msg = mensajes.find((m) => m.id === r.id);
-        if (msg) lineas.push(`  • ${r.razon}`);
-      });
-    });
+    renderTemas(urgentes);
     lineas.push('');
   }
 
   if (importantes.length) {
     lineas.push(`🟡 *IMPORTANTE*`);
-    const temas = agruparPorTema(importantes);
-    Object.entries(temas).forEach(([tema, items]) => {
-      lineas.push(`*${tema}*`);
-      items.forEach((r) => {
-        const msg = mensajes.find((m) => m.id === r.id);
-        if (msg) lineas.push(`  • ${r.razon}`);
-      });
-    });
+    renderTemas(importantes);
   }
 
   const texto = lineas.join('\n');
