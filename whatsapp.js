@@ -162,27 +162,34 @@ async function enviarResumen(mensajes, resultados) {
   const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
   const lineas = [`*Resumen ${hora}*\n`];
 
-  function agruparPorTema(lista) {
+  function renderDetalle(lista) {
+    lista.forEach((r) => {
+      const msg = mensajes.find((m) => m.id === r.id);
+      if (!msg) return;
+      const chat = msg.chat_nombre ?? msg.chat_id;
+      const quien = msg.remitente ? `${msg.remitente} (${chat})` : chat;
+      const preview = msg.cuerpo.length > 60 ? msg.cuerpo.slice(0, 60) + '…' : msg.cuerpo;
+      lineas.push(`• *${quien}*: ${preview}`);
+      lineas.push(`  _${r.razon}_`);
+    });
+  }
+
+  function renderTemas(lista) {
     const temas = {};
     lista.forEach((r) => {
       const tema = r.tema ?? 'General';
       if (!temas[tema]) temas[tema] = [];
       temas[tema].push(r);
     });
-    return temas;
-  }
-
-  function renderTemas(lista) {
-    const temas = agruparPorTema(lista);
     Object.entries(temas).forEach(([tema, items]) => {
-      const sufijo = items.length > 1 ? ` _(${items.length} mensajes)_` : '';
+      const sufijo = items.length > 1 ? ` _(${items.length})_` : '';
       lineas.push(`• *${tema}*${sufijo}: ${items[0].razon}`);
     });
   }
 
   if (urgentes.length) {
     lineas.push(`🔴 *URGENTE*`);
-    renderTemas(urgentes);
+    renderDetalle(urgentes);
     lineas.push('');
   }
 
