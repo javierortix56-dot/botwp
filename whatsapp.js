@@ -6,6 +6,7 @@ const {
 const pino = require('pino');
 const { guardarMensaje, useTursoAuthState } = require('./db');
 const { debeAnalizarse, obtenerFlags } = require('./filtros');
+const config = require('./config.json');
 require('dotenv').config();
 
 const logger = pino({ level: 'silent' });
@@ -15,7 +16,6 @@ let listo = false;
 
 function normalizarJid(jid) {
   if (!jid) return jid;
-  // whatsapp-web.js usa @c.us, Baileys usa @s.whatsapp.net
   return jid.replace('@c.us', '@s.whatsapp.net');
 }
 
@@ -147,6 +147,26 @@ async function iniciarCliente(callbacks = {}) {
   return sock;
 }
 
+async function resolverDestino() {
+  const nombreGrupo = config.grupo_resumen;
+  if (nombreGrupo && sock) {
+    try {
+      const grupos = await sock.groupFetchAllParticipating();
+      const entrada = Object.entries(grupos).find(
+        ([, g]) => g.subject?.toLowerCase().trim() === nombreGrupo.toLowerCase().trim()
+      );
+      if (entrada) {
+        console.log(`[WA] Destino resumen: grupo "${nombreGrupo}" (${entrada[0]})`);
+        return entrada[0];
+      }
+      console.warn(`[WA] Grupo "${nombreGrupo}" no encontrado — usando MY_WHATSAPP_ID`);
+    } catch (err) {
+      console.warn(`[WA] Error buscando grupo destino:`, err.message);
+    }
+  }
+  return normalizarJid(process.env.MY_WHATSAPP_ID);
+}
+
 async function enviarResumen(mensajes, temas) {
   if (!sock || !listo) throw new Error('Cliente WA no inicializado');
   if (!temas.length) {
@@ -164,11 +184,11 @@ async function enviarResumen(mensajes, temas) {
   });
 
   const texto = lineas.join('\n');
-  const destino = normalizarJid(process.env.MY_WHATSAPP_ID);
+  const destino = await resolverDestino();
 
   try {
     await sock.sendMessage(destino, { text: texto });
-    console.log(`[WA] Resumen enviado — ${temas.length} temas`);
+    console.log(`[WA] Resumen enviado a ${destino} — ${temas.length} temas`);
   } catch (err) {
     console.error(`[WA] Error enviando resumen:`, err.message);
   }
