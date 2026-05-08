@@ -29,7 +29,7 @@ function notificarNtfy(temas) {
     path: `/${process.env.NTFY_TOPIC}`,
     method: 'POST',
     headers: {
-      'Title': `Resumen WhatsApp — ${temas.length} tema${temas.length > 1 ? 's' : ''}`,
+      'Title': `Resumen WhatsApp - ${temas.length} tema${temas.length > 1 ? 's' : ''}`,
       'Priority': 'high',
       'Content-Type': 'text/plain',
       'Content-Length': body.length,
@@ -63,7 +63,7 @@ function iniciarServidor() {
           chatNombre: 'Chat de prueba',
           remitente: 'Tester',
           remitenteId: 'test@c.us',
-          cuerpo: 'Este es un mensaje de prueba URGENTE &#8212; verific&#225; que el bot funciona correctamente.',
+          cuerpo: 'Este es un mensaje de prueba URGENTE - verifica que el bot funciona correctamente.',
           timestamp: Math.floor(Date.now() / 1000),
           esVip: false,
           tieneKeyword: true,
@@ -142,53 +142,9 @@ function iniciarServidor() {
 <head>
   <meta http-equiv="refresh" content="30">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Vincular WhatsApp &#8212; botwp</title>
-  <style>
-    body { font-family: sans-serif; background: #f0f2f5; margin: 0; padding: 32px 16px; color: #111; }
-    .card { background: #fff; border-radius: 12px; max-width: 480px; margin: 0 auto; padding: 32px 24px; box-shadow: 0 2px 12px rgba(0,0,0,.08); text-align: center; }
-    h2 { margin: 0 0 8px; font-size: 1.3rem; }
-    .warning { background: #fff3cd; border-left: 4px solid #f0a500; border-radius: 4px; padding: 12px 16px; margin: 20px 0; text-align: left; font-size: .9rem; }
-    .steps { text-align: left; background: #f0f2f5; border-radius: 8px; padding: 16px 16px 16px 32px; margin: 20px 0; font-size: .92rem; line-height: 1.8; }
-    .steps li { margin-bottom: 4px; }
-    .steps strong { color: #075e54; }
-    .qr-img { border: 3px solid #075e54; border-radius: 8px; padding: 8px; margin: 20px auto; display: block; }
-    .refresh-note { color: #888; font-size: .8rem; margin-top: 16px; }
-    .platform { margin-top: 16px; }
-    .platform summary { cursor: pointer; font-size: .85rem; color: #555; }
-    .platform ol { margin: 8px 0 0; font-size: .85rem; line-height: 1.7; padding-left: 20px; }
-  </style>
+  <title>Vincular WhatsApp - botwp</title>
 </head>
-<body>
-  <div class="card">
-    <h2>&#128241; Vincular WhatsApp al bot</h2>
-    <div class="warning">
-      &#9888;&#65039; <strong>No uses la c&#225;mara del tel&#233;fono ni Google Lens</strong> para escanear este QR &#8212; eso no funciona con WhatsApp.<br>
-      Deb&#233;s escanearlo desde <strong>adentro de la app de WhatsApp</strong>.
-    </div>
-    <img src="${imgDataUrl}" class="qr-img" width="280" height="280" alt="QR WhatsApp"/>
-    <div class="steps">
-      <strong>Android:</strong>
-      <ol>
-        <li>Abr&#237; <strong>WhatsApp</strong></li>
-        <li>Toc&#225; los <strong>tres puntos &#8942;</strong> (arriba a la derecha)</li>
-        <li>Toc&#225; <strong>Dispositivos vinculados</strong></li>
-        <li>Toc&#225; <strong>Vincular dispositivo</strong></li>
-        <li>Apunt&#225; la c&#225;mara <em>de WhatsApp</em> al QR de arriba</li>
-      </ol>
-    </div>
-    <details class="platform">
-      <summary>&#191;Us&#225;s iPhone? Ver pasos para iOS</summary>
-      <ol>
-        <li>Abr&#237; <strong>WhatsApp</strong></li>
-        <li>Toc&#225; <strong>Configuraci&#243;n</strong> (abajo a la derecha)</li>
-        <li>Toc&#225; <strong>Dispositivos vinculados</strong></li>
-        <li>Toc&#225; <strong>Vincular dispositivo</strong></li>
-        <li>Apunt&#225; la c&#225;mara <em>de WhatsApp</em> al QR de arriba</li>
-      </ol>
-    </details>
-    <p class="refresh-note">Esta p&#225;gina se actualiza sola cada 30 segundos. El QR expira en ~60 seg.</p>
-  </div>
-</body>
+<body><img src="${imgDataUrl}" width="280" alt="QR WhatsApp"/></body>
 </html>`);
       } catch (err) {
         res.end(`<p>Error generando QR: ${err.message}</p>`);
@@ -215,14 +171,14 @@ function iniciarServidor() {
 
 async function procesarMensajes() {
   const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-  console.log(`\n[Cron] Iniciando ciclo de análisis — ${hora}`);
+  console.log(`\n[Cron] Iniciando ciclo de análisis - ${hora}`);
 
   try {
     const mensajes = await obtenerMensajesSinProcesar();
     console.log(`[Cron] ${mensajes.length} mensajes sin procesar`);
 
     if (!mensajes.length) {
-      console.log(`[Cron] Nada que analizar — fin del ciclo`);
+      console.log(`[Cron] Nada que analizar - fin del ciclo`);
       return;
     }
 
@@ -233,7 +189,7 @@ async function procesarMensajes() {
     const ids = mensajes.map((m) => m.id);
     await marcarProcesados(ids);
 
-    console.log(`[Cron] Ciclo completo — ${resultados.length} temas, ${ids.length} mensajes procesados`);
+    console.log(`[Cron] Ciclo completo - ${resultados.length} temas, ${ids.length} mensajes procesados`);
   } catch (err) {
     console.error(`[Cron] Error en ciclo de análisis:`, err.message);
   }
@@ -257,19 +213,19 @@ async function main() {
         estadoWA = 'qr';
         qrActual = qr;
         tsAutenticando = null;
-        console.log(`[WA] QR listo — visitá https://botwp-nivv.onrender.com para escanearlo`);
+        console.log(`[WA] QR listo - visita la URL para escanearlo`);
       },
       onAutenticando: () => {
         estadoWA = 'autenticando';
         qrActual = null;
         tsAutenticando = Date.now();
-        console.log(`[WA] QR escaneado — autenticando con los servidores de WhatsApp...`);
+        console.log(`[WA] QR escaneado - autenticando...`);
       },
       onListo: () => {
         const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : '?';
         estadoWA = 'conectado';
         qrActual = null;
-        console.log(`[WA] ¡Listo! Conectado en ${segs}s desde el escaneo`);
+        console.log(`[WA] Listo! Conectado en ${segs}s desde el escaneo`);
       },
     });
   } catch (err) {
@@ -281,7 +237,7 @@ async function main() {
     timezone: 'America/Argentina/Buenos_Aires',
   });
 
-  console.log(`[Bot] Cron activo — próximo análisis según "${config.resumen.hora_cron}"`);
+  console.log(`[Bot] Cron activo - proximo analisis segun "${config.resumen.hora_cron}"`);
 }
 
 main();
