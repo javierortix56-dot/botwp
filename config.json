@@ -5,7 +5,8 @@
   ],
   "grupos": [
     "Trabajo equipo",
-    "Familia"
+    "Familia",
+    "5° GRADO MIXTO"
   ],
   "keywords": [
     "urgente",
@@ -18,7 +19,7 @@
     "llámame"
   ],
   "resumen": {
-    "hora_cron": "0 * * * *",
+    "hora_cron": "0 8,20 * * *",
     "max_mensajes_por_batch": 5
   }
 }
