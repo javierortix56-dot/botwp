@@ -76,7 +76,7 @@ function iniciarServidor() {
 
     if (req.url === '/test' && req.method === 'GET') {
       if (estadoWA !== 'conectado') {
-        res.end('<p>El bot no esta conectado aun. Escanea el QR primero.</p>');
+        res.end('<p>El bot no esta conectado aun.</p>');
         return;
       }
       try {
@@ -91,7 +91,7 @@ function iniciarServidor() {
           tieneKeyword: true,
         });
         await procesarMensajes();
-        res.end('<p>Prueba ejecutada. Revisa ntfy y WhatsApp.</p><a href="/">Volver</a>');
+        res.end('<p>Prueba ejecutada. Revisa ntfy.</p><a href="/">Volver</a>');
       } catch (err) {
         res.end(`<p>Error: ${err.message}</p>`);
       }
@@ -100,12 +100,35 @@ function iniciarServidor() {
 
     if (req.url === '/procesar' && req.method === 'GET') {
       if (estadoWA !== 'conectado') {
-        res.end('<p>El bot no esta conectado aun.</p>');
+        res.end('<p>El bot no esta conectado.</p>');
         return;
       }
       try {
         await procesarMensajes();
-        res.end('<p>Procesamiento ejecutado. Revisa ntfy.</p><a href="/">Volver</a>');
+        res.end('<p>Analisis ejecutado. Revisa ntfy.</p><a href="/">Volver</a>');
+      } catch (err) {
+        res.end(`<p>Error: ${err.message}</p>`);
+      }
+      return;
+    }
+
+    if (req.url === '/historial' && req.method === 'GET') {
+      if (estadoWA !== 'conectado') {
+        res.end('<p>El bot no esta conectado.</p>');
+        return;
+      }
+      try {
+        const todos = await obtenerMensajesSinProcesar();
+        const grupales = todos.filter((m) => m.chat_id?.endsWith('@g.us')).length;
+        const individuales = todos.length - grupales;
+        procesarMensajes().catch((err) => console.error('[Historial]', err.message));
+        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
+          <h2>Procesando historial</h2>
+          <p>${todos.length} mensajes pendientes (${grupales} grupales, ${individuales} individuales)</p>
+          <p style="color:#888;font-size:.85rem">Esto puede tardar unos minutos. Vas a recibir las notificaciones en ntfy a medida que se procesen.</p>
+          <p style="color:#888;font-size:.8rem">Si no aparecen mensajes historicos, reinicia el servicio en Render para forzar otra sincronizacion con WhatsApp.</p>
+          <a href="/">Volver</a>
+        </body></html>`);
       } catch (err) {
         res.end(`<p>Error: ${err.message}</p>`);
       }
@@ -116,8 +139,9 @@ function iniciarServidor() {
       res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
         <h2>WhatsApp conectado</h2>
         <p>Bot activo y escuchando mensajes.</p>
-        <p><a href="/test" style="display:inline-block;margin:8px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none">Mensaje de prueba</a></p>
-        <p><a href="/procesar" style="display:inline-block;margin:8px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none">Procesar ahora</a></p>
+        <p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none">Enviar mensaje de prueba</a></p>
+        <p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none">Procesar mensajes nuevos</a></p>
+        <p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none">Revisar historial completo (15 dias, leidos y no leidos)</a></p>
       </body></html>`);
       return;
     }
