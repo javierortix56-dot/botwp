@@ -11,10 +11,10 @@ const PROMPT_SISTEMA = `Eres un asistente que clasifica mensajes de WhatsApp par
 Para cada mensaje devuelves EXACTAMENTE uno de estos tres valores:
 - "urgente"    → requiere atención inmediata (emergencia, dinero, plazo hoy, problema crítico)
 - "importante" → hay que leerlo pronto pero no es emergencia
-- "ignorar"    → spam, saludos, memes, conversación intrascendente
+- "ignorar"    → spam, saludos, memes, conversación intrascendente, felicitaciones de cumpleaños, stickers, audios de cortesía
 
 Responde SOLO con un array JSON, sin texto extra, con este formato:
-[{"id": <id>, "clasificacion": "<urgente|importante|ignorar>", "razon": "<una frase corta>"}]`;
+[{"id": <id>, "clasificacion": "<urgente|importante|ignorar>", "razon": "<una frase corta>", "tema": "<tema en 2-3 palabras>"}]`;
 
 async function clasificarBatch(mensajes) {
   const lista = mensajes
