@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: botwp
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: TURSO_URL
+        sync: false
+      - key: TURSO_TOKEN
+        sync: false
+      - key: MY_WHATSAPP_ID
+        sync: false
