@@ -1,4 +1,4 @@
-if (!globalThis.crypto) globalThis.crypto = require('crypto').webcrypto;
+global.crypto = require('crypto').webcrypto;
 
 const http = require('http');
 const cron = require('node-cron');
@@ -10,7 +10,7 @@ const config = require('./config.json');
 
 const PORT = process.env.PORT || 3000;
 
-let estadoWA = 'arrancando'; // 'arrancando' | 'qr' | 'autenticando' | 'conectado'
+let estadoWA = 'arrancando';
 let qrActual = null;
 let tsAutenticando = null;
 
@@ -18,13 +18,12 @@ function iniciarServidor() {
   const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
 
-    // Endpoint de prueba: inserta un mensaje ficticio y dispara el análisis
     if (req.url === '/test' && req.method === 'GET') {
       if (estadoWA !== 'conectado') {
         res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
-          <h2>⚠️ El bot no está conectado aún</h2>
-          <p>Primero escaneá el QR para vincular WhatsApp.</p>
-          <a href="/">← Volver</a>
+          <h2>&#9888;&#65039; El bot no est&#225; conectado a&#250;n</h2>
+          <p>Primero escane&#225; el QR para vincular WhatsApp.</p>
+          <a href="/">&#8592; Volver</a>
         </body></html>`);
         return;
       }
@@ -34,18 +33,18 @@ function iniciarServidor() {
           chatNombre: 'Chat de prueba',
           remitente: 'Tester',
           remitenteId: 'test@c.us',
-          cuerpo: 'Este es un mensaje de prueba URGENTE — verificá que el bot funciona correctamente.',
+          cuerpo: 'Este es un mensaje de prueba URGENTE — verific&#225; que el bot funciona correctamente.',
           timestamp: Math.floor(Date.now() / 1000),
           esVip: false,
           tieneKeyword: true,
         });
         await procesarMensajes();
         res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
-          <h2>✅ Prueba ejecutada</h2>
-          <p>Se insertó un mensaje de prueba y se disparó el análisis.<br>
-          Revisá tu WhatsApp — deberías recibir el resumen en unos segundos.</p>
-          <p style="color:#888;font-size:.85rem">También revisá los logs en Render para ver si hubo algún error.</p>
-          <a href="/">← Volver</a>
+          <h2>&#9989; Prueba ejecutada</h2>
+          <p>Se insert&#243; un mensaje de prueba y se dispar&#243; el an&#225;lisis.<br>
+          Revis&#225; tu WhatsApp &#8212; deber&#237;as recibir el resumen en unos segundos.</p>
+          <p style="color:#888;font-size:.85rem">Tambi&#233;n revis&#225; los logs en Render para ver si hubo alg&#250;n error.</p>
+          <a href="/">&#8592; Volver</a>
         </body></html>`);
       } catch (err) {
         res.end(`<p>Error en prueba: ${err.message}</p>`);
@@ -55,8 +54,8 @@ function iniciarServidor() {
 
     if (estadoWA === 'conectado') {
       res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
-        <h2>✅ WhatsApp conectado</h2>
-        <p>El bot está activo y escuchando mensajes.</p>
+        <h2>&#9989; WhatsApp conectado</h2>
+        <p>El bot est&#225; activo y escuchando mensajes.</p>
         <p><a href="/test" style="display:inline-block;margin-top:16px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p>
       </body></html>`);
       return;
@@ -70,11 +69,11 @@ function iniciarServidor() {
         <title>Conectando...</title>
       </head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5">
         <div style="background:#fff;border-radius:12px;max-width:400px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)">
-          <div style="font-size:3rem;margin-bottom:16px">🔄</div>
+          <div style="font-size:3rem;margin-bottom:16px">&#128260;</div>
           <h2 style="margin:0 0 12px">Conectando con WhatsApp...</h2>
-          <p style="color:#555;margin:0 0 8px">Estableciendo conexión con los servidores de WhatsApp.</p>
-          <p style="color:#888;font-size:.85rem">Tiempo esperando: ${segs}s — esta página se actualiza sola cada 3 segundos.</p>
-          ${segs > 30 ? `<p style="color:#c0392b;font-size:.85rem;margin-top:16px">⚠️ Está tardando más de lo normal. Revisá los logs en Render.</p>` : ''}
+          <p style="color:#555;margin:0 0 8px">Estableciendo conexi&#243;n con los servidores de WhatsApp.</p>
+          <p style="color:#888;font-size:.85rem">Tiempo esperando: ${segs}s &#8212; esta p&#225;gina se actualiza sola cada 3 segundos.</p>
+          ${segs > 30 ? `<p style="color:#c0392b;font-size:.85rem;margin-top:16px">&#9888;&#65039; Est&#225; tardando m&#225;s de lo normal. Revis&#225; los logs en Render.</p>` : ''}
         </div>
       </body></html>`);
       return;
@@ -88,7 +87,7 @@ function iniciarServidor() {
 <head>
   <meta http-equiv="refresh" content="30">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Vincular WhatsApp — botwp</title>
+  <title>Vincular WhatsApp &#8212; botwp</title>
   <style>
     body { font-family: sans-serif; background: #f0f2f5; margin: 0; padding: 32px 16px; color: #111; }
     .card { background: #fff; border-radius: 12px; max-width: 480px; margin: 0 auto; padding: 32px 24px; box-shadow: 0 2px 12px rgba(0,0,0,.08); text-align: center; }
@@ -106,37 +105,33 @@ function iniciarServidor() {
 </head>
 <body>
   <div class="card">
-    <h2>📱 Vincular WhatsApp al bot</h2>
+    <h2>&#128241; Vincular WhatsApp al bot</h2>
     <div class="warning">
-      ⚠️ <strong>No uses la cámara del teléfono ni Google Lens</strong> para escanear este QR — eso no funciona con WhatsApp.<br>
-      Debés escanearlo desde <strong>adentro de la app de WhatsApp</strong>.
+      &#9888;&#65039; <strong>No uses la c&#225;mara del tel&#233;fono ni Google Lens</strong> para escanear este QR &#8212; eso no funciona con WhatsApp.<br>
+      Deb&#233;s escanearlo desde <strong>adentro de la app de WhatsApp</strong>.
     </div>
-
     <img src="${imgDataUrl}" class="qr-img" width="280" height="280" alt="QR WhatsApp"/>
-
     <div class="steps">
       <strong>Android:</strong>
       <ol>
-        <li>Abrí <strong>WhatsApp</strong></li>
-        <li>Tocá los <strong>tres puntos ⋮</strong> (arriba a la derecha)</li>
-        <li>Tocá <strong>Dispositivos vinculados</strong></li>
-        <li>Tocá <strong>Vincular dispositivo</strong></li>
-        <li>Apuntá la cámara <em>de WhatsApp</em> al QR de arriba</li>
+        <li>Abr&#237; <strong>WhatsApp</strong></li>
+        <li>Toc&#225; los <strong>tres puntos &#8942;</strong> (arriba a la derecha)</li>
+        <li>Toc&#225; <strong>Dispositivos vinculados</strong></li>
+        <li>Toc&#225; <strong>Vincular dispositivo</strong></li>
+        <li>Apunt&#225; la c&#225;mara <em>de WhatsApp</em> al QR de arriba</li>
       </ol>
     </div>
-
     <details class="platform">
-      <summary>¿Usás iPhone? Ver pasos para iOS</summary>
+      <summary>&#191;Us&#225;s iPhone? Ver pasos para iOS</summary>
       <ol>
-        <li>Abrí <strong>WhatsApp</strong></li>
-        <li>Tocá <strong>Configuración</strong> (abajo a la derecha)</li>
-        <li>Tocá <strong>Dispositivos vinculados</strong></li>
-        <li>Tocá <strong>Vincular dispositivo</strong></li>
-        <li>Apuntá la cámara <em>de WhatsApp</em> al QR de arriba</li>
+        <li>Abr&#237; <strong>WhatsApp</strong></li>
+        <li>Toc&#225; <strong>Configuraci&#243;n</strong> (abajo a la derecha)</li>
+        <li>Toc&#225; <strong>Dispositivos vinculados</strong></li>
+        <li>Toc&#225; <strong>Vincular dispositivo</strong></li>
+        <li>Apunt&#225; la c&#225;mara <em>de WhatsApp</em> al QR de arriba</li>
       </ol>
     </details>
-
-    <p class="refresh-note">Esta página se actualiza sola cada 30 segundos. El QR expira en ~60 seg.</p>
+    <p class="refresh-note">Esta p&#225;gina se actualiza sola cada 30 segundos. El QR expira en ~60 seg.</p>
   </div>
 </body>
 </html>`);
@@ -151,9 +146,9 @@ function iniciarServidor() {
       <meta name="viewport" content="width=device-width,initial-scale=1">
     </head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5">
       <div style="background:#fff;border-radius:12px;max-width:400px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)">
-        <div style="font-size:3rem;margin-bottom:16px">⏳</div>
+        <div style="font-size:3rem;margin-bottom:16px">&#9203;</div>
         <h2 style="margin:0 0 12px">Arrancando bot...</h2>
-        <p style="color:#888;font-size:.85rem">Esta página se actualiza sola cada 2 segundos.</p>
+        <p style="color:#888;font-size:.85rem">Esta p&#225;gina se actualiza sola cada 2 segundos.</p>
       </div>
     </body></html>`);
   });
@@ -203,7 +198,7 @@ async function main() {
   }
 
   try {
-    const cliente = await iniciarCliente({
+    await iniciarCliente({
       onQR: (qr) => {
         estadoWA = 'qr';
         qrActual = qr;
