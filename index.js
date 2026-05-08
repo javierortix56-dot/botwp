@@ -61,11 +61,36 @@ function iniciarServidor() {
       return;
     }
 
+    if (req.url === '/procesar' && req.method === 'GET') {
+      if (estadoWA !== 'conectado') {
+        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
+          <h2>&#9888;&#65039; El bot no est&#225; conectado a&#250;n</h2>
+          <p>Primero escane&#225; el QR para vincular WhatsApp.</p>
+          <a href="/">&#8592; Volver</a>
+        </body></html>`);
+        return;
+      }
+      try {
+        await procesarMensajes();
+        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
+          <h2>&#9989; An&#225;lisis ejecutado</h2>
+          <p>Se procesaron los mensajes reales acumulados.<br>
+          Si hab&#237;a mensajes pendientes, deber&#237;as recibir el resumen en WhatsApp en unos segundos.</p>
+          <p style="color:#888;font-size:.85rem">Si no llega nada, es que no hab&#237;a mensajes nuevos para analizar.</p>
+          <a href="/">&#8592; Volver</a>
+        </body></html>`);
+      } catch (err) {
+        res.end(`<p>Error: ${err.message}</p>`);
+      }
+      return;
+    }
+
     if (estadoWA === 'conectado') {
       res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
         <h2>&#9989; WhatsApp conectado</h2>
         <p>El bot est&#225; activo y escuchando mensajes.</p>
         <p><a href="/test" style="display:inline-block;margin-top:16px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p>
+        <p><a href="/procesar" style="display:inline-block;margin-top:8px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Procesar mensajes reales ahora</a></p>
       </body></html>`);
       return;
     }
