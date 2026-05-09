@@ -75,39 +75,44 @@ async function buscarJumboDetallado(query) {
 }
 
 async function buscarCotoDetallado(query) {
-  try {
-    const url = `https://www.cotodigital.com.ar/sitios/cdigi/categoria?Ntt=${encodeURIComponent(query)}&No=0&Nrpp=5`;
-    const { data } = await axios.get(url, {
-      headers: { ...HEADERS, Accept: 'text/html' },
-      timeout: 12000,
-    });
-    const $ = cheerio.load(data);
-    const resultados = [];
+  const dominios = ['www.cotodigital3.com.ar', 'www.cotodigital.com.ar'];
+  for (const dominio of dominios) {
+    try {
+      const url = `https://${dominio}/sitios/cdigi/categoria?Ntt=${encodeURIComponent(query)}&No=0&Nrpp=5`;
+      const { data } = await axios.get(url, {
+        headers: { ...HEADERS, Accept: 'text/html' },
+        timeout: 12000,
+      });
+      const $ = cheerio.load(data);
+      console.log(`[Precios] Coto (${dominio}): title="${$('title').text().trim().slice(0, 60)}", .item_container=${$('.item_container').length}`);
+      const resultados = [];
 
-    $('.item_container').slice(0, 5).each((_, el) => {
-      const contenedor = $(el);
-      const nombre = contenedor.find('.descrip_full_name, .descrip_name').first().text().trim() || query;
-      const precioTexto = contenedor.find('.precio_vigente span, .atg_store_newPrice span').first().text().trim();
-      const precio = parsearPrecio(precioTexto);
-      const originalTexto = contenedor.find('.precio_tachado span, .atg_store_oldPrice span').first().text().trim();
-      const precioOriginal = parsearPrecio(originalTexto) || precio;
+      $('.item_container').slice(0, 5).each((_, el) => {
+        const contenedor = $(el);
+        const nombre = contenedor.find('.descrip_full_name, .descrip_name').first().text().trim() || query;
+        const precioTexto = contenedor.find('.precio_vigente span, .atg_store_newPrice span').first().text().trim();
+        const precio = parsearPrecio(precioTexto);
+        const originalTexto = contenedor.find('.precio_tachado span, .atg_store_oldPrice span').first().text().trim();
+        const precioOriginal = parsearPrecio(originalTexto) || precio;
 
-      if (precio) {
-        resultados.push({
-          supermercado: 'Coto',
-          nombre,
-          precio,
-          precioOriginal,
-          tienePromo: precioOriginal > precio,
-          url: `https://www.cotodigital.com.ar/sitios/cdigi/categoria?Ntt=${encodeURIComponent(query)}`,
-        });
-      }
-    });
-    return resultados;
-  } catch (err) {
-    console.error(`[Precios] Coto detallado error (${query}):`, err.message);
-    return [];
+        if (precio) {
+          resultados.push({
+            supermercado: 'Coto',
+            nombre,
+            precio,
+            precioOriginal,
+            tienePromo: precioOriginal > precio,
+            url,
+          });
+        }
+      });
+
+      if (resultados.length) return resultados;
+    } catch (err) {
+      console.error(`[Precios] Coto (${dominio}) error:`, err.message);
+    }
   }
+  return [];
 }
 
 function limpiarUrl(input) {

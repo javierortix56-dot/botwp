@@ -151,7 +151,7 @@ function iniciarServidor() {
       (async () => {
         try {
           const resultados = await buscarProductoDetallado(query);
-          const analisis = await analizarProductoDetallado(resultados);
+          const analisis = formatearBusqueda(resultados);
           postNtfy('Busqueda producto', analisis.replace(/\*/g, '').replace(/_/g, ''));
           await enviarTextoLibre(analisis);
         } catch (err) {
@@ -220,6 +220,28 @@ function iniciarServidor() {
   server.listen(PORT, () => {
     console.log(`[Server] Escuchando en puerto ${PORT}`);
   });
+}
+
+function formatearBusqueda({ query, carrefour, jumbo, coto }) {
+  const todos = [...(carrefour || []), ...(jumbo || []), ...(coto || [])];
+  if (!todos.length) return `Sin resultados para "${query}".`;
+
+  todos.sort((a, b) => a.precio - b.precio);
+
+  const lineas = [`🔍 *${query}*`, ''];
+  todos.forEach((item, i) => {
+    const corona = i === 0 ? '👑 ' : '';
+    const promo = item.tienePromo ? ` _(antes $${item.precioOriginal.toFixed(0)})_` : '';
+    lineas.push(`${corona}*${item.supermercado}* $${item.precio.toFixed(0)} — ${item.nombre}${promo}`);
+  });
+
+  if (todos.length > 1) {
+    const ahorro = todos[todos.length - 1].precio - todos[0].precio;
+    lineas.push('');
+    lineas.push(`💰 Diferencia: $${ahorro.toFixed(0)}`);
+  }
+
+  return lineas.join('\n');
 }
 
 async function buscarYCompararPrecios() {
