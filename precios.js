@@ -192,21 +192,17 @@ async function buscarProductoDetallado(query) {
   const q = limpiarUrl(query);
   console.log(`[Precios] Búsqueda detallada: "${q}"${esCotoUrl ? ' (Coto URL directa)' : esUrl ? ' (URL)' : ''}`);
 
-  // Si es URL específica, traer 1 resultado por super (el más relevante).
-  // Si es búsqueda libre, traer 5 para mostrar todas las presentaciones.
+  // URL específica → 1 resultado por super. Búsqueda libre → 5 presentaciones.
   const cantidad = esUrl ? 1 : 5;
-  const [carrefour, jumbo] = await Promise.all([
+  const [carrefourRaw, jumboRaw, coto] = await Promise.all([
     buscarVtex('https://www.carrefour.com.ar', 'Carrefour', q, cantidad),
     buscarVtex('https://www.jumbo.com.ar', 'Jumbo', q, cantidad),
+    esCotoUrl ? buscarCotoPorUrlProducto(query).then((p) => (p ? [p] : [])) : buscarCotoDetallado(q),
   ]);
 
-  let coto;
-  if (esCotoUrl) {
-    const prod = await buscarCotoPorUrlProducto(query);
-    coto = prod ? [prod] : [];
-  } else {
-    coto = await buscarCotoDetallado(q);
-  }
+  // buscarVtex con cantidad=1 devuelve objeto o null; normalizar a array
+  const carrefour = Array.isArray(carrefourRaw) ? carrefourRaw : carrefourRaw ? [carrefourRaw] : [];
+  const jumbo = Array.isArray(jumboRaw) ? jumboRaw : jumboRaw ? [jumboRaw] : [];
 
   return { query: q, carrefour, jumbo, coto };
 }
