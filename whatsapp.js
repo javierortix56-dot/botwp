@@ -16,6 +16,7 @@ let listo = false;
 
 function normalizarJid(jid) {
   if (!jid) return jid;
+  // whatsapp-web.js usa @c.us, Baileys usa @s.whatsapp.net
   return jid.replace('@c.us', '@s.whatsapp.net');
 }
 
@@ -49,7 +50,7 @@ async function iniciarCliente(callbacks = {}) {
   sock.ev.on('creds.update', saveCreds);
 
   // Backfill: cuando WhatsApp sincroniza historial, guardamos mensajes recientes
-  // para el resumen diario.
+  // de chats individuales para el resumen diario.
   sock.ev.on('messaging-history.set', async ({ messages }) => {
     if (!messages?.length) return;
     const dias = config.dias_historial ?? 15;
@@ -126,6 +127,7 @@ async function iniciarCliente(callbacks = {}) {
         return;
       }
 
+      // 440 = otra instancia tomó la sesión (deploy solapado). Ceder sin pelear.
       if (code === 440) {
         console.warn(`[WA] Conflicto de sesión — otra instancia activa, esta se retira`);
         return;
@@ -194,16 +196,26 @@ async function resolverDestino() {
   if (nombreGrupo && sock) {
     try {
       const grupos = await sock.groupFetchAllParticipating();
+      const nombresDisponibles = Object.values(grupos).map((g) => g.subject);
+      console.log(`[WA] Grupos disponibles: ${nombresDisponibles.join(', ') || '(ninguno)'}`);
       const entrada = Object.entries(grupos).find(
         ([, g]) => g.subject?.toLowerCase().trim() === nombreGrupo.toLowerCase().trim()
       );
-      if (entrada) return entrada[0];
+      if (entrada) {
+        console.log(`[WA] Destino resumen: grupo "${nombreGrupo}" (${entrada[0]})`);
+        return entrada[0];
+      }
+      console.warn(`[WA] Grupo "${nombreGrupo}" no encontrado — usando MY_WHATSAPP_ID`);
     } catch (err) {
       console.warn(`[WA] Error buscando grupo destino:`, err.message);
     }
   }
-  return normalizarJid(process.env.MY_WHATSAPP_ID);
+  const destino = normalizarJid(process.env.MY_WHATSAPP_ID);
+  console.log(`[WA] Destino resumen: ${destino}`);
+  return destino;
 }
+
+const TIPO_EMOJI = { accion: '\u{1F534}', pago: '\u{1F4B0}', evento: '\u{1F4C5}', info: 'ℹ️' };
 
 async function enviarResumen(mensajes, temas) {
   if (!sock || !listo) throw new Error('Cliente WA no inicializado');
@@ -213,21 +225,29 @@ async function enviarResumen(mensajes, temas) {
   }
 
   const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-  const lineas = [`📋 *Resumen ${hora}*\n`];
+  const lineas = [`\u{1F4CB} *Resumen grupos ${hora}*\n`];
 
-  temas.forEach((t) => {
-    const cantMensajes = t.ids?.length > 1 ? ` _(${t.ids.length} mensajes)_` : '';
-    lineas.push(`• *${t.tema}*${cantMensajes} — ${t.chat}`);
+  // Ordenar: primero accion y pago, luego evento, luego info
+  const orden = { accion: 0, pago: 1, evento: 2, info: 3 };
+  const ordenados = [...temas].sort((a, b) => (orden[a.tipo] ?? 3) - (orden[b.tipo] ?? 3));
+
+  ordenados.forEach((t) => {
+    const emoji = TIPO_EMOJI[t.tipo] || '•';
+    lineas.push(`${emoji} *${t.tema}* — ${t.chat}`);
     lineas.push(`  ${t.resumen}`);
+    if (t.accion) lineas.push(`  _→ ${t.accion}_`);
   });
 
   const texto = lineas.join('\n');
   const destino = await resolverDestino();
 
+  // Para grupos, obtener metadata antes de enviar fuerza la distribución de claves de cifrado
   if (destino.endsWith('@g.us')) {
     try {
       await sock.groupMetadata(destino);
-    } catch {}
+    } catch {
+      // ignorar — el send igual puede funcionar
+    }
     await new Promise((r) => setTimeout(r, 1000));
   }
 
@@ -239,4 +259,19 @@ async function enviarResumen(mensajes, temas) {
   }
 }
 
-module.exports = { iniciarCliente, enviarResumen };
+async function enviarTextoLibre(texto) {
+  if (!sock || !listo) throw new Error('Cliente WA no inicializado');
+  const destino = await resolverDestino();
+  if (destino.endsWith('@g.us')) {
+    try { await sock.groupMetadata(destino); } catch {}
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  try {
+    await sock.sendMessage(destino, { text: texto });
+    console.log(`[WA] Texto enviado a ${destino}`);
+  } catch (err) {
+    console.error(`[WA] Error enviando texto:`, err.message);
+  }
+}
+
+module.exports = { iniciarCliente, enviarResumen, enviarTextoLibre };

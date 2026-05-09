@@ -7,40 +7,61 @@ const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
 
 const BATCH_SIZE = config.resumen.max_mensajes_por_batch;
 
-const PROMPT_GRUPOS = `Eres un asistente que resume conversaciones de WhatsApp para su dueño.
+const PROMPT_GRUPOS = `Sos un asistente que analiza grupos de WhatsApp y le reporta al dueño del teléfono qué necesita saber o hacer.
 
-Se te dan mensajes de distintos chats. Tu tarea es agruparlos por temática y devolver un resumen compacto de cada tema.
+Se te dan mensajes de distintos grupos. Tu trabajo es identificar temas relevantes y determinar con precisión qué implica cada uno para el dueño.
 
-Reglas:
-- Ignorá saludos, memes, stickers, audios de cortesía y spam — no los incluyas en el resumen
-- Agrupá mensajes relacionados bajo un mismo tema aunque vengan de chats distintos
-- El resumen de cada tema debe ser una oración clara que explique qué está pasando
-- Si hay algo que requiere acción o respuesta, indicalo en el resumen
+CLASIFICACIÓN DE TEMAS:
+- "accion": el dueño debe responder, confirmar, firmar, traer algo, decidir, autorizar, etc.
+- "pago": hay que pagar algo — cuota, excursión, materiales, servicio, etc.
+- "evento": algo que ocurre en una fecha específica — acto, reunión, excursión, partido, etc.
+- "info": información útil pero sin acción requerida del dueño
 
-Responde SOLO con un array JSON, sin texto extra, con este formato:
-[{"tema": "<tema en 2-4 palabras>", "resumen": "<una oración explicando qué pasa>", "chat": "<nombre del chat o chats>", "ids": [<id>, ...]}]
+PARA GRUPOS ESCOLARES prestá especial atención a:
+- Autorizaciones para firmar o devolver (indicá el plazo si lo hay)
+- Pagos: cuotas, actividades, materiales, viajes (incluí monto y fecha límite si se mencionan)
+- Eventos: actos patrios, obras de teatro, excursiones, competencias, jornadas especiales
+- Comunicados de docentes o dirección con instrucciones para los padres
+- Cosas que los chicos deben llevar o traer
 
-Si todos los mensajes son irrelevantes (saludos, spam, etc.), devolvé un array vacío: []`;
+REGLAS:
+- Ignorá completamente: saludos, GIFs, stickers, audios de cortesía, chistes, spam, comentarios sin contenido
+- Una oración precisa por tema, sin vaguedades — si hay fecha, monto o destinatario específico, incluílos
+- El campo "accion" debe decir exactamente qué tiene que hacer el dueño (o null si es solo info)
+- No agrupés temas distintos — mejor dos entradas separadas que una entrada confusa
 
-const PROMPT_INDIVIDUALES = `Eres un asistente que analiza chats individuales de WhatsApp para su dueño.
+Respondé SOLO con un array JSON válido, sin texto extra antes ni después:
+[{"tema": "<2-4 palabras>", "resumen": "<qué pasa, con datos concretos>", "chat": "<nombre del grupo>", "ids": [<id>, ...], "tipo": "<accion|pago|evento|info>", "accion": "<qué debe hacer el dueño exactamente, o null>"}]
 
-Tu tarea es identificar dos tipos de cosas:
-1. EVENTOS calendarizables: reuniones, citas, plazos, fechas de pago, cumpleaños, vencimientos — cualquier cosa con fecha/hora específica que se beneficie de estar en un calendario
-2. ASUNTOS importantes: temas que requieren acción, respuesta o recordar (sin fecha específica)
+Si todos los mensajes son irrelevantes (saludos, spam, etc.), devolvé: []`;
 
-Reglas:
-- Ignorá saludos, memes, conversación social, audios cortos y spam
-- Para eventos, extraé la fecha/hora si está mencionada (formato ISO 8601 si es posible: YYYY-MM-DD HH:MM)
-- Si la fecha es relativa ("mañana", "el viernes"), interpretala según la fecha de hoy y devolvé la fecha absoluta
-- Sé conservador — solo incluí cosas que realmente parecen importantes
+const PROMPT_INDIVIDUALES = `Sos un asistente que analiza chats individuales de WhatsApp para su dueño y le reporta qué tiene pendiente.
 
-Responde SOLO con un objeto JSON, sin texto extra, con este formato:
+Tu tarea es identificar tres tipos de cosas en las conversaciones:
+
+1. EVENTOS: cosas con fecha/hora — turnos médicos, reuniones, citas, plazos, vencimientos, cumpleaños, entregas
+2. COMPROMISOS: cosas que el dueño prometió hacer, quedó en hacer, o tiene pendiente resolver
+3. PEDIDOS: cosas que otras personas le están pidiendo al dueño — responder algo, hacer algo, enviar algo, decidir algo
+
+DIFERENCIA CLAVE:
+- "compromisos" = el dueño tomó una iniciativa o prometió algo ("voy a mandar el presupuesto", "te confirmo mañana")
+- "pedidos" = alguien le pide algo al dueño ("necesito que me pases X", "podés revisar Y?", "cuándo me mandás Z?")
+
+REGLAS:
+- Ignorá completamente: saludos, chistes, conversación social sin peso, stickers, GIFs, audios cortos de cortesía
+- Sé preciso — indicá exactamente qué, para quién, y cuándo si aplica
+- Para eventos: extraé fecha y hora en formato ISO 8601 (YYYY-MM-DD HH:MM). Si la fecha es relativa ("mañana", "el viernes"), convertíla usando la fecha de hoy
+- Si el mismo chat tiene varios pedidos, listálos por separado
+- Sé conservador — solo lo que realmente importa o requiere acción
+
+Respondé SOLO con un objeto JSON válido, sin texto extra:
 {
-  "eventos": [{"titulo": "<qué es>", "fecha": "<YYYY-MM-DD HH:MM o YYYY-MM-DD si no hay hora>", "chat": "<de quién>", "detalle": "<contexto breve>"}],
-  "asuntos": [{"tema": "<asunto en 2-4 palabras>", "resumen": "<qué pasa y qué se espera>", "chat": "<de quién>"}]
+  "eventos": [{"titulo": "<qué es>", "fecha": "<YYYY-MM-DD HH:MM o YYYY-MM-DD>", "chat": "<de quién>", "detalle": "<contexto concreto>"}],
+  "compromisos": [{"tema": "<2-4 palabras>", "resumen": "<qué quedó pendiente y para cuándo>", "chat": "<con quién>"}],
+  "pedidos": [{"de": "<nombre de la persona>", "pedido": "<qué pide exactamente>", "chat": "<contacto>", "contexto": "<contexto breve para entender de qué trata>"}]
 }
 
-Si no hay nada relevante: {"eventos": [], "asuntos": []}`;
+Si no hay nada relevante: {"eventos": [], "compromisos": [], "pedidos": []}`;
 
 async function callGemini(prompt) {
   const result = await model.generateContent(prompt);
@@ -93,9 +114,10 @@ async function analizarMensajes(mensajes) {
 }
 
 async function analizarIndividuales(mensajes) {
-  if (!mensajes.length) return { eventos: [], asuntos: [] };
+  if (!mensajes.length) return { eventos: [], compromisos: [], pedidos: [] };
   const eventos = [];
-  const asuntos = [];
+  const compromisos = [];
+  const pedidos = [];
   const hoy = new Date().toISOString().slice(0, 10);
 
   for (let i = 0; i < mensajes.length; i += BATCH_SIZE) {
@@ -108,14 +130,15 @@ async function analizarIndividuales(mensajes) {
     try {
       const resultado = await resumirBatchIndividuales(batch, hoy);
       eventos.push(...(resultado.eventos || []));
-      asuntos.push(...(resultado.asuntos || []));
-      console.log(`[Gemini] Batch ${numBatch} OK — ${resultado.eventos?.length || 0} eventos, ${resultado.asuntos?.length || 0} asuntos`);
+      compromisos.push(...(resultado.compromisos || []));
+      pedidos.push(...(resultado.pedidos || []));
+      console.log(`[Gemini] Batch ${numBatch} OK — ${resultado.eventos?.length || 0} eventos, ${resultado.compromisos?.length || 0} compromisos, ${resultado.pedidos?.length || 0} pedidos`);
     } catch (err) {
       console.error(`[Gemini] Error en batch ${numBatch}:`, err.message);
     }
   }
 
-  return { eventos, asuntos };
+  return { eventos, compromisos, pedidos };
 }
 
 module.exports = { analizarMensajes, analizarIndividuales };
