@@ -141,4 +141,35 @@ async function analizarIndividuales(mensajes) {
   return { eventos, compromisos, pedidos };
 }
 
-module.exports = { analizarMensajes, analizarIndividuales };
+const PROMPT_PRECIOS = `Sos un asistente que analiza precios de supermercados para optimizar las compras de una familia argentina.
+
+Se te da una lista de productos con los precios encontrados en Carrefour, Jumbo y Coto. Tu tarea es armar la estrategia de compra más inteligente.
+
+REGLAS:
+- Si la diferencia entre supermercados es menor a 5%, no vale la pena dividir el viaje por ese producto
+- Agrupá los productos por supermercado donde conviene comprarlos
+- Si hay descuento (precioOriginal > precio), mencionalo como "en oferta"
+- Si un producto no se encontró en algún super, indicalo
+- Calculá el ahorro total estimado vs comprar todo en el más caro
+- Sé directo y práctico — el objetivo es ahorrar tiempo y plata
+
+Respondé en texto plano formateado para WhatsApp (usá *negrita* y saltos de línea). Estructura:
+1. Primero la estrategia recomendada por supermercado
+2. Después los productos sin resultados (si hay)
+3. Al final el ahorro estimado`;
+
+async function analizarPrecios(resultados) {
+  const lista = resultados.map(({ producto, resultados: r }) => {
+    if (!r.length) return `${producto}: sin resultados`;
+    const precios = r.map((x) => {
+      const oferta = x.precioOriginal > x.precio ? ` (antes $${x.precioOriginal.toFixed(0)})` : '';
+      return `${x.supermercado}: $${x.precio.toFixed(0)}${oferta}`;
+    }).join(' | ');
+    return `${producto}: ${precios}`;
+  }).join('\n');
+
+  const texto = await callGemini(`${PROMPT_PRECIOS}\n\nProductos y precios:\n${lista}`);
+  return texto;
+}
+
+module.exports = { analizarMensajes, analizarIndividuales, analizarPrecios };

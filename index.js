@@ -14,7 +14,8 @@ const cron = require('node-cron');
 const QRCode = require('qrcode');
 const { conectar, obtenerMensajesSinProcesar, marcarProcesados, guardarMensaje, limpiarAuth } = require('./db');
 const { iniciarCliente, enviarResumen, enviarTextoLibre } = require('./whatsapp');
-const { analizarMensajes, analizarIndividuales } = require('./gemini');
+const { analizarMensajes, analizarIndividuales, analizarPrecios } = require('./gemini');
+const { buscarTodos } = require('./precios');
 const config = require('./config.json');
 
 const https = require('https');
@@ -165,6 +166,27 @@ function iniciarServidor() {
       return;
     }
 
+    if (req.url === '/precios' && req.method === 'GET') {
+      if (estadoWA !== 'conectado') {
+        res.end(`<p>El bot no est&#225; conectado.</p>`);
+        return;
+      }
+      buscarYCompararPrecios().catch((err) => console.error('[Precios]', err.message));
+      res.end(`<!DOCTYPE html><html><head>
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>Buscando precios...</title>
+      </head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5">
+        <div style="background:#fff;border-radius:12px;max-width:420px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)">
+          <div style="font-size:3rem;margin-bottom:16px">&#128722;</div>
+          <h2 style="margin:0 0 12px">Buscando precios...</h2>
+          <p style="color:#555">Comparando ${(config.lista_compras || []).length} productos en Carrefour, Jumbo y Coto.</p>
+          <p style="color:#888;font-size:.85rem;margin-top:16px">En ~60 segundos recibi&#769;s el resultado en WhatsApp y ntfy.</p>
+          <a href="/" style="display:inline-block;margin-top:24px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none">Volver al inicio</a>
+        </div>
+      </body></html>`);
+      return;
+    }
+
     if (req.url === '/limpiar-sesion' && req.method === 'GET') {
       try {
         await limpiarAuth();
@@ -188,7 +210,6 @@ function iniciarServidor() {
         const todos = await obtenerMensajesSinProcesar();
         const grupales = todos.filter((m) => m.chat_id?.endsWith('@g.us')).length;
         const individuales = todos.length - grupales;
-        // Disparar procesamiento completo
         procesarMensajes().catch((err) => console.error('[Historial]', err.message));
         res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
           <h2>Procesando historial</h2>
@@ -210,6 +231,7 @@ function iniciarServidor() {
         <p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p>
         <p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Procesar mensajes nuevos</a></p>
         <p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Revisar historial completo (15 d&#237;as, le&#237;dos y no le&#237;dos)</a></p>
+        <p><a href="/precios" style="display:inline-block;margin:6px;padding:10px 24px;background:#e67e22;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128722; Comparar precios supermercados</a></p>
         <p style="margin-top:24px"><a href="/limpiar-sesion" style="display:inline-block;margin:6px;padding:8px 20px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem" onclick="return confirm('Borrar sesi&#243;n? Vas a tener que re-escanear el QR.')">Limpiar sesi&#243;n y re-sincronizar historial</a></p>
       </body></html>`);
       return;
@@ -310,6 +332,27 @@ function iniciarServidor() {
   server.listen(PORT, () => {
     console.log(`[Server] Escuchando en puerto ${PORT}`);
   });
+}
+
+async function buscarYCompararPrecios() {
+  const lista = config.lista_compras;
+  if (!lista?.length) throw new Error('lista_compras vacía en config.json');
+
+  console.log(`[Precios] Iniciando búsqueda de ${lista.length} productos...`);
+  const resultados = await buscarTodos(lista);
+
+  const encontrados = resultados.filter((r) => r.resultados.length > 0).length;
+  console.log(`[Precios] Búsqueda completa — ${encontrados}/${lista.length} productos encontrados`);
+
+  const analisis = await analizarPrecios(resultados);
+
+  postNtfy('Comparacion supermercados', analisis.replace(/\*/g, '').replace(/_/g, ''));
+
+  try {
+    await enviarTextoLibre(analisis);
+  } catch (err) {
+    console.error(`[Precios] Error enviando a WA:`, err.message);
+  }
 }
 
 async function procesarMensajesGrupos() {

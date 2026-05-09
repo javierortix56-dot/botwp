@@ -1,4 +1,18 @@
 {
+  "lista_compras": [
+    "leche",
+    "arroz",
+    "fideos",
+    "aceite girasol",
+    "harina",
+    "azucar",
+    "detergente",
+    "jabon liquido",
+    "yogur",
+    "manteca",
+    "pan lactal",
+    "huevos"
+  ],
   "vips": [
     "5491112345678",
     "5491187654321"
