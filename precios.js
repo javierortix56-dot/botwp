@@ -130,14 +130,54 @@ function limpiarUrl(input) {
   return input;
 }
 
+async function buscarCotoPorUrlProducto(urlProducto) {
+  try {
+    const { data } = await axios.get(urlProducto, {
+      headers: { ...HEADERS, Accept: 'text/html' },
+      timeout: 12000,
+    });
+    const $ = cheerio.load(data);
+    const nombre = $('h1, .product-title, .atg_store_productTitle').first().text().trim();
+    const precioTexto = $('.atg_store_newPrice span, .precio_vigente span, .precioFinal, .atg_store_newPrice').first().text().trim();
+    const precio = parsearPrecio(precioTexto);
+    if (!precio) {
+      console.error(`[Precios] Coto URL directa: sin precio en ${urlProducto} (html len=${data.length})`);
+      return null;
+    }
+    const originalTexto = $('.atg_store_oldPrice span, .precio_tachado span, .atg_store_oldPrice').first().text().trim();
+    const precioOriginal = parsearPrecio(originalTexto) || precio;
+    return {
+      supermercado: 'Coto',
+      nombre: nombre || 'Producto Coto',
+      precio,
+      precioOriginal,
+      tienePromo: precioOriginal > precio,
+      url: urlProducto,
+    };
+  } catch (err) {
+    console.error(`[Precios] Coto URL directa error:`, err.message);
+    return null;
+  }
+}
+
 async function buscarProductoDetallado(query) {
+  const esCotoUrl = /cotodigital/i.test(query);
   const q = limpiarUrl(query);
-  console.log(`[Precios] Búsqueda detallada: "${q}"`);
-  const [carrefour, jumbo, coto] = await Promise.all([
+  console.log(`[Precios] Búsqueda detallada: "${q}"${esCotoUrl ? ' (Coto URL directa)' : ''}`);
+
+  const [carrefour, jumbo] = await Promise.all([
     buscarCarrefourDetallado(q),
     buscarJumboDetallado(q),
-    buscarCotoDetallado(q),
   ]);
+
+  let coto;
+  if (esCotoUrl) {
+    const prod = await buscarCotoPorUrlProducto(query);
+    coto = prod ? [prod] : [];
+  } else {
+    coto = await buscarCotoDetallado(q);
+  }
+
   return { query: q, carrefour, jumbo, coto };
 }
 
@@ -199,9 +239,32 @@ async function buscarTodos(lista) {
   return resultados;
 }
 
+async function buscarProductoConUrl(url) {
+  const esCotoUrl = /cotodigital/i.test(url);
+  const query = limpiarUrl(url);
+  const [carrefour, jumbo] = await Promise.all([
+    buscarCarrefour(query),
+    buscarJumbo(query),
+  ]);
+  let coto;
+  if (esCotoUrl) {
+    coto = await buscarCotoPorUrlProducto(url);
+  } else {
+    coto = await buscarCoto(query);
+  }
+  const resultados = [carrefour, jumbo, coto].filter(Boolean);
+  return { producto: query, resultados };
+}
+
 async function buscarDesdeUrls(urls) {
-  const lista = urls.map(limpiarUrl);
-  return buscarTodos(lista);
+  console.log(`[Precios] Buscando ${urls.length} productos desde URLs...`);
+  const resultados = [];
+  for (let i = 0; i < urls.length; i += 4) {
+    const lote = urls.slice(i, i + 4);
+    const loteResultados = await Promise.all(lote.map(buscarProductoConUrl));
+    resultados.push(...loteResultados);
+  }
+  return resultados;
 }
 
 module.exports = { buscarTodos, buscarProductoDetallado, buscarDesdeUrls };
