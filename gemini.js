@@ -72,7 +72,6 @@ async function resumirBatchGrupos(mensajes) {
   const lista = mensajes
     .map((m) => `ID ${m.id} | De: ${m.remitente ?? m.remitente_id} | Chat: ${m.chat_nombre ?? m.chat_id}\nMensaje: ${m.cuerpo}`)
     .join('\n---\n');
-
   const texto = await callGemini(`${PROMPT_GRUPOS}\n\nMensajes:\n${lista}`);
   const match = texto.match(/\[[\s\S]*\]/);
   if (!match) throw new Error(`Respuesta inesperada: ${texto.slice(0, 200)}`);
@@ -83,7 +82,6 @@ async function resumirBatchIndividuales(mensajes, hoy) {
   const lista = mensajes
     .map((m) => `ID ${m.id} | De: ${m.remitente ?? m.remitente_id}\nMensaje: ${m.cuerpo}`)
     .join('\n---\n');
-
   const texto = await callGemini(`${PROMPT_INDIVIDUALES}\n\nFecha de hoy: ${hoy}\n\nMensajes:\n${lista}`);
   const match = texto.match(/\{[\s\S]*\}/);
   if (!match) throw new Error(`Respuesta inesperada: ${texto.slice(0, 200)}`);
@@ -93,14 +91,11 @@ async function resumirBatchIndividuales(mensajes, hoy) {
 async function analizarMensajes(mensajes) {
   if (!mensajes.length) return [];
   const temas = [];
-
   for (let i = 0; i < mensajes.length; i += BATCH_SIZE) {
     const batch = mensajes.slice(i, i + BATCH_SIZE);
     const numBatch = Math.floor(i / BATCH_SIZE) + 1;
     const totalBatches = Math.ceil(mensajes.length / BATCH_SIZE);
-
     console.log(`[Gemini] Resumiendo batch ${numBatch}/${totalBatches} (${batch.length} mensajes)`);
-
     try {
       const resultado = await resumirBatchGrupos(batch);
       temas.push(...resultado);
@@ -109,7 +104,6 @@ async function analizarMensajes(mensajes) {
       console.error(`[Gemini] Error en batch ${numBatch}:`, err.message);
     }
   }
-
   return temas;
 }
 
@@ -119,14 +113,11 @@ async function analizarIndividuales(mensajes) {
   const compromisos = [];
   const pedidos = [];
   const hoy = new Date().toISOString().slice(0, 10);
-
   for (let i = 0; i < mensajes.length; i += BATCH_SIZE) {
     const batch = mensajes.slice(i, i + BATCH_SIZE);
     const numBatch = Math.floor(i / BATCH_SIZE) + 1;
     const totalBatches = Math.ceil(mensajes.length / BATCH_SIZE);
-
     console.log(`[Gemini] Analizando individuales batch ${numBatch}/${totalBatches} (${batch.length} mensajes)`);
-
     try {
       const resultado = await resumirBatchIndividuales(batch, hoy);
       eventos.push(...(resultado.eventos || []));
@@ -137,7 +128,6 @@ async function analizarIndividuales(mensajes) {
       console.error(`[Gemini] Error en batch ${numBatch}:`, err.message);
     }
   }
-
   return { eventos, compromisos, pedidos };
 }
 
@@ -167,9 +157,42 @@ async function analizarPrecios(resultados) {
     }).join(' | ');
     return `${producto}: ${precios}`;
   }).join('\n');
-
-  const texto = await callGemini(`${PROMPT_PRECIOS}\n\nProductos y precios:\n${lista}`);
-  return texto;
+  return callGemini(`${PROMPT_PRECIOS}\n\nProductos y precios:\n${lista}`);
 }
 
-module.exports = { analizarMensajes, analizarIndividuales, analizarPrecios };
+const PROMPT_PRODUCTO_DETALLADO = `Sos un asistente que compara precios de supermercados argentinos para un producto específico.
+
+Se te da el resultado de buscar un producto en Carrefour, Jumbo y Coto, con múltiples presentaciones por supermercado.
+
+Tu tarea:
+1. Identificar cuál es la mejor opción precio/calidad considerando tamaño y precio unitario (precio por litro o por kg si aplica)
+2. Destacar cualquier promoción activa (precio con descuento vs precio original)
+3. Mencionar si hay presentaciones convenientes que no sean la más obvia (ej: el pack de 6 sale más barato por unidad)
+4. Indicar claramente en qué super conviene comprar cada presentación
+
+Respondé en texto formateado para WhatsApp (*negrita*, saltos de línea). Sé concreto y directo.
+Estructura:
+\u{1F3C6} Mejor opción general
+\u{1F4E6} Por supermercado (las mejores opciones de cada uno)
+\u{1F3F7}️ Promociones activas (si hay)
+\u{1F4A1} Recomendación final`;
+
+async function analizarProductoDetallado({ query, carrefour, jumbo, coto }) {
+  const formatear = (items, super_) => {
+    if (!items.length) return `${super_}: sin resultados`;
+    return items.map((x) => {
+      const promo = x.tienePromo ? ` \u{1F3F7}️ OFERTA (antes $${x.precioOriginal.toFixed(0)})` : '';
+      return `  • ${x.nombre}: $${x.precio.toFixed(0)}${promo}`;
+    }).join('\n');
+  };
+  const lista = [
+    `Búsqueda: "${query}"`,
+    '',
+    `JUMBO:\n${formatear(jumbo, 'Jumbo')}`,
+    `CARREFOUR:\n${formatear(carrefour, 'Carrefour')}`,
+    `COTO:\n${formatear(coto, 'Coto')}`,
+  ].join('\n');
+  return callGemini(`${PROMPT_PRODUCTO_DETALLADO}\n\nResultados:\n${lista}`);
+}
+
+module.exports = { analizarMensajes, analizarIndividuales, analizarPrecios, analizarProductoDetallado };
