@@ -35,18 +35,19 @@ async function buscarVtex(baseUrl, supermercado, producto, cantidad = 1) {
       };
     }
 
+    // Modo múltiples resultados: aplanar todas las presentaciones
     const resultados = [];
-    for (const prod of data) {
-      for (const item of (prod.items || [])) {
+    for (const producto of data) {
+      for (const item of (producto.items || [])) {
         const oferta = item.sellers?.[0]?.commertialOffer;
         if (!oferta?.IsAvailable || !oferta?.Price) continue;
         resultados.push({
           supermercado,
-          nombre: `${prod.productName} — ${item.name}`,
+          nombre: `${producto.productName} — ${item.name}`,
           precio: oferta.Price,
           precioOriginal: oferta.ListPrice ?? oferta.Price,
           tienePromo: (oferta.ListPrice ?? oferta.Price) > oferta.Price,
-          url: `${baseUrl}${prod.link}`,
+          url: `${baseUrl}${producto.link}`,
         });
       }
     }
@@ -75,7 +76,7 @@ async function buscarJumboDetallado(query) {
 
 async function buscarCotoDetallado(query) {
   try {
-    const url = `https://www.coto.com.ar/busqueda/index.aspx?q=${encodeURIComponent(query)}`;
+    const url = `https://www.cotodigital.com.ar/sitios/cdigi/categoria?Ntt=${encodeURIComponent(query)}&No=0&Nrpp=5`;
     const { data } = await axios.get(url, {
       headers: { ...HEADERS, Accept: 'text/html' },
       timeout: 12000,
@@ -83,29 +84,22 @@ async function buscarCotoDetallado(query) {
     const $ = cheerio.load(data);
     const resultados = [];
 
-    $('.product-item, .item-product, .product-list-item').slice(0, 5).each((_, el) => {
+    $('.item_container').slice(0, 5).each((_, el) => {
       const contenedor = $(el);
-      let nombre = null;
-      let precio = null;
-
-      for (const sel of ['.product-item-name', '.description', '.product-name', 'h2.name', '.item-title']) {
-        const txt = contenedor.find(sel).first().text().trim();
-        if (txt) { nombre = txt; break; }
-      }
-      for (const sel of ['.product-item-price', '.price', '.selling-price', '.product-price', '.item-price']) {
-        const txt = contenedor.find(sel).first().text().trim();
-        const p = parsearPrecio(txt);
-        if (p) { precio = p; break; }
-      }
+      const nombre = contenedor.find('.descrip_full_name, .descrip_name').first().text().trim() || query;
+      const precioTexto = contenedor.find('.precio_vigente span, .atg_store_newPrice span').first().text().trim();
+      const precio = parsearPrecio(precioTexto);
+      const originalTexto = contenedor.find('.precio_tachado span, .atg_store_oldPrice span').first().text().trim();
+      const precioOriginal = parsearPrecio(originalTexto) || precio;
 
       if (precio) {
         resultados.push({
           supermercado: 'Coto',
-          nombre: nombre || query,
+          nombre,
           precio,
-          precioOriginal: precio,
-          tienePromo: false,
-          url,
+          precioOriginal,
+          tienePromo: precioOriginal > precio,
+          url: `https://www.cotodigital.com.ar/sitios/cdigi/categoria?Ntt=${encodeURIComponent(query)}`,
         });
       }
     });
@@ -116,49 +110,23 @@ async function buscarCotoDetallado(query) {
   }
 }
 
-async function buscarCoto(producto) {
+function limpiarUrl(input) {
   try {
-    const url = `https://www.coto.com.ar/busqueda/index.aspx?q=${encodeURIComponent(producto)}`;
-    const { data } = await axios.get(url, {
-      headers: { ...HEADERS, Accept: 'text/html' },
-      timeout: 12000,
-    });
-    const $ = cheerio.load(data);
-
-    const contenedor = $('.product-item, .item-product, .product-list-item').first();
-    if (!contenedor.length) return null;
-
-    let nombre = null;
-    let precio = null;
-
-    for (const sel of ['.product-item-name', '.description', '.product-name', 'h2.name', '.item-title']) {
-      const txt = contenedor.find(sel).first().text().trim();
-      if (txt) { nombre = txt; break; }
-    }
-    for (const sel of ['.product-item-price', '.price', '.selling-price', '.product-price', '.item-price']) {
-      const txt = contenedor.find(sel).first().text().trim();
-      const p = parsearPrecio(txt);
-      if (p) { precio = p; break; }
-    }
-
-    if (!precio) return null;
-    return { supermercado: 'Coto', nombre: nombre || producto, precio, precioOriginal: precio, url };
-  } catch (err) {
-    console.error(`[Precios] Coto error (${producto}):`, err.message);
-    return null;
-  }
-}
-
-function limpiarUrlJumbo(input) {
-  try {
-    const match = input.match(/jumbo\.com\.ar\/([^/]+)\/p/);
-    if (match) return match[1].replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+    // Jumbo: /slug/p
+    const jumbo = input.match(/jumbo\.com\.ar\/([^/?#]+)\/p/);
+    if (jumbo) return jumbo[1].replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+    // Carrefour: /slug/p
+    const carrefour = input.match(/carrefour\.com\.ar\/([^/?#]+)\/p/);
+    if (carrefour) return carrefour[1].replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+    // Cotodigital: /productos/slug/_/
+    const coto = input.match(/cotodigital[^/]*\.com\.ar\/[^/]+\/[^/]+\/([^/_]+)/);
+    if (coto) return coto[1].replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
   } catch {}
   return input;
 }
 
 async function buscarProductoDetallado(query) {
-  const q = limpiarUrlJumbo(query);
+  const q = limpiarUrl(query);
   console.log(`[Precios] Búsqueda detallada: "${q}"`);
   const [carrefour, jumbo, coto] = await Promise.all([
     buscarCarrefourDetallado(q),
@@ -166,6 +134,39 @@ async function buscarProductoDetallado(query) {
     buscarCotoDetallado(q),
   ]);
   return { query: q, carrefour, jumbo, coto };
+}
+
+async function buscarCoto(producto) {
+  try {
+    const url = `https://www.cotodigital.com.ar/sitios/cdigi/categoria?Ntt=${encodeURIComponent(producto)}&No=0&Nrpp=1`;
+    const { data } = await axios.get(url, {
+      headers: { ...HEADERS, Accept: 'text/html' },
+      timeout: 12000,
+    });
+    const $ = cheerio.load(data);
+
+    const contenedor = $('.item_container').first();
+    if (!contenedor.length) return null;
+
+    const nombre = contenedor.find('.descrip_full_name, .descrip_name').first().text().trim() || producto;
+    const precioTexto = contenedor.find('.precio_vigente span, .atg_store_newPrice span').first().text().trim();
+    const precio = parsearPrecio(precioTexto);
+    if (!precio) return null;
+
+    const originalTexto = contenedor.find('.precio_tachado span, .atg_store_oldPrice span').first().text().trim();
+    const precioOriginal = parsearPrecio(originalTexto) || precio;
+
+    return {
+      supermercado: 'Coto',
+      nombre,
+      precio,
+      precioOriginal,
+      url: `https://www.cotodigital.com.ar/sitios/cdigi/categoria?Ntt=${encodeURIComponent(producto)}`,
+    };
+  } catch (err) {
+    console.error(`[Precios] Coto error (${producto}):`, err.message);
+    return null;
+  }
 }
 
 async function buscarProducto(producto) {
@@ -181,13 +182,21 @@ async function buscarProducto(producto) {
 async function buscarTodos(lista) {
   console.log(`[Precios] Buscando ${lista.length} productos en 3 supermercados...`);
   const resultados = [];
+
+  // De a 4 productos en paralelo para no saturar
   for (let i = 0; i < lista.length; i += 4) {
     const lote = lista.slice(i, i + 4);
     const loteResultados = await Promise.all(lote.map(buscarProducto));
     resultados.push(...loteResultados);
     console.log(`[Precios] Lote ${Math.floor(i / 4) + 1} completado`);
   }
+
   return resultados;
 }
 
-module.exports = { buscarTodos, buscarProductoDetallado };
+async function buscarDesdeUrls(urls) {
+  const lista = urls.map(limpiarUrl);
+  return buscarTodos(lista);
+}
+
+module.exports = { buscarTodos, buscarProductoDetallado, buscarDesdeUrls };

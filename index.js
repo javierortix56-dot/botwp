@@ -15,7 +15,7 @@ const QRCode = require('qrcode');
 const { conectar, obtenerMensajesSinProcesar, marcarProcesados, guardarMensaje, limpiarAuth } = require('./db');
 const { iniciarCliente, enviarResumen, enviarTextoLibre } = require('./whatsapp');
 const { analizarMensajes, analizarIndividuales, analizarPrecios, analizarProductoDetallado } = require('./gemini');
-const { buscarTodos, buscarProductoDetallado } = require('./precios');
+const { buscarTodos, buscarProductoDetallado, buscarDesdeUrls } = require('./precios');
 const config = require('./config.json');
 
 const https = require('https');
@@ -223,10 +223,13 @@ function iniciarServidor() {
 }
 
 async function buscarYCompararPrecios() {
+  const urls = config.lista_compras_urls;
   const lista = config.lista_compras;
-  if (!lista?.length) throw new Error('lista_compras vacía en config.json');
-  console.log(`[Precios] Iniciando búsqueda de ${lista.length} productos...`);
-  const resultados = await buscarTodos(lista);
+  const usandoUrls = Array.isArray(urls) && urls.length > 0;
+  if (!usandoUrls && !lista?.length) throw new Error('lista_compras y lista_compras_urls vacías en config.json');
+  const cantidad = usandoUrls ? urls.length : lista.length;
+  console.log(`[Precios] Iniciando búsqueda de ${cantidad} productos (${usandoUrls ? 'URLs' : 'nombres'})...`);
+  const resultados = usandoUrls ? await buscarDesdeUrls(urls) : await buscarTodos(lista);
   const encontrados = resultados.filter((r) => r.resultados.length > 0).length;
   console.log(`[Precios] Búsqueda completa — ${encontrados}/${lista.length} productos encontrados`);
   const analisis = await analizarPrecios(resultados);
