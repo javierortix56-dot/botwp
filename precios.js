@@ -123,8 +123,8 @@ function limpiarUrl(input) {
     // Carrefour: /slug/p
     const carrefour = input.match(/carrefour\.com\.ar\/([^/?#]+)\/p/);
     if (carrefour) return carrefour[1].replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
-    // Cotodigital: /productos/slug/_/
-    const coto = input.match(/cotodigital[^/]*\.com\.ar\/[^/]+\/[^/]+\/([^/_]+)/);
+    // Cotodigital: /sitios/cdigi/productos/slug/_/codigo
+    const coto = input.match(/cotodigital[^/]*\.com\.ar\/sitios\/cdigi\/productos\/([^/_]+)/);
     if (coto) return coto[1].replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
   } catch {}
   return input;
@@ -137,21 +137,47 @@ async function buscarCotoPorUrlProducto(urlProducto) {
       timeout: 12000,
     });
     const $ = cheerio.load(data);
-    const nombre = $('h1, .product-title, .atg_store_productTitle').first().text().trim();
-    const precioTexto = $('.atg_store_newPrice span, .precio_vigente span, .precioFinal, .atg_store_newPrice').first().text().trim();
-    const precio = parsearPrecio(precioTexto);
+
+    // Intentar JSON-LD (schema.org Product) — presente en HTML estático
+    let precio = null;
+    let precioOriginal = null;
+    let nombre = null;
+
+    $('script[type="application/ld+json"]').each((_, el) => {
+      if (precio) return;
+      try {
+        const json = JSON.parse($(el).text());
+        const obj = json['@type'] === 'Product' ? json : (Array.isArray(json) ? json.find((x) => x['@type'] === 'Product') : null);
+        if (!obj) return;
+        nombre = obj.name || nombre;
+        const offer = Array.isArray(obj.offers) ? obj.offers[0] : obj.offers;
+        if (offer?.price) {
+          precio = parseFloat(String(offer.price).replace(',', '.'));
+          precioOriginal = parseFloat(String(offer.priceBeforeDiscount || offer.price).replace(',', '.'));
+        }
+      } catch {}
+    });
+
+    // Fallback: selectores CSS
     if (!precio) {
-      console.error(`[Precios] Coto URL directa: sin precio en ${urlProducto} (html len=${data.length})`);
+      const precioTexto = $('.atg_store_newPrice span, .precio_vigente span, .atg_store_newPrice, .precio_vigente').first().text().trim();
+      precio = parsearPrecio(precioTexto);
+      const originalTexto = $('.atg_store_oldPrice span, .precio_tachado span').first().text().trim();
+      precioOriginal = parsearPrecio(originalTexto) || precio;
+      nombre = nombre || $('h1, .atg_store_productTitle').first().text().trim();
+    }
+
+    if (!precio) {
+      console.error(`[Precios] Coto URL directa: sin precio. HTML snippet: ${data.slice(0, 500)}`);
       return null;
     }
-    const originalTexto = $('.atg_store_oldPrice span, .precio_tachado span, .atg_store_oldPrice').first().text().trim();
-    const precioOriginal = parsearPrecio(originalTexto) || precio;
+
     return {
       supermercado: 'Coto',
-      nombre: nombre || 'Producto Coto',
+      nombre: nombre || limpiarUrl(urlProducto),
       precio,
-      precioOriginal,
-      tienePromo: precioOriginal > precio,
+      precioOriginal: precioOriginal || precio,
+      tienePromo: (precioOriginal || precio) > precio,
       url: urlProducto,
     };
   } catch (err) {
@@ -162,12 +188,16 @@ async function buscarCotoPorUrlProducto(urlProducto) {
 
 async function buscarProductoDetallado(query) {
   const esCotoUrl = /cotodigital/i.test(query);
+  const esUrl = /\.(com\.ar|com)\//i.test(query);
   const q = limpiarUrl(query);
-  console.log(`[Precios] Búsqueda detallada: "${q}"${esCotoUrl ? ' (Coto URL directa)' : ''}`);
+  console.log(`[Precios] Búsqueda detallada: "${q}"${esCotoUrl ? ' (Coto URL directa)' : esUrl ? ' (URL)' : ''}`);
 
+  // Si es URL específica, traer 1 resultado por super (el más relevante).
+  // Si es búsqueda libre, traer 5 para mostrar todas las presentaciones.
+  const cantidad = esUrl ? 1 : 5;
   const [carrefour, jumbo] = await Promise.all([
-    buscarCarrefourDetallado(q),
-    buscarJumboDetallado(q),
+    buscarVtex('https://www.carrefour.com.ar', 'Carrefour', q, cantidad),
+    buscarVtex('https://www.jumbo.com.ar', 'Jumbo', q, cantidad),
   ]);
 
   let coto;
