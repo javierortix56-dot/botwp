@@ -4,7 +4,7 @@ const {
   fetchLatestBaileysVersion,
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const { guardarMensaje, useTursoAuthState } = require('./db');
+const { guardarMensaje, useTursoAuthState, limpiarAuth } = require('./db');
 const { debeAnalizarse, obtenerFlags } = require('./filtros');
 const config = require('./config.json');
 require('dotenv').config();
@@ -81,14 +81,14 @@ async function iniciarCliente(callbacks = {}) {
         if (!debeAnalizarse(msgData)) continue;
 
         const { esVip, tieneKeyword } = obtenerFlags(msgData);
-        await guardarMensaje({ ...msgData, esVip, tieneKeyword });
-        guardados++;
+        const insertado = await guardarMensaje({ ...msgData, esVip, tieneKeyword });
+        if (insertado) guardados++;
       } catch (err) {
         console.error(`[WA] Error en backfill:`, err.message);
       }
     }
     if (guardados > 0) {
-      console.log(`[WA] Backfill: ${guardados} mensajes históricos guardados (últimos ${dias} días)`);
+      console.log(`[WA] Backfill: ${guardados} mensajes nuevos guardados (últimos ${dias} días, duplicados ignorados)`);
     }
   });
 
@@ -116,29 +116,36 @@ async function iniciarCliente(callbacks = {}) {
       const code = lastDisconnect?.error?.output?.statusCode;
       const motivo = lastDisconnect?.error?.message ?? 'desconocido';
       console.warn(`[WA] Desconectado (${code}): ${motivo}`);
+      if (callbacks.onDesconectado) callbacks.onDesconectado(code, motivo);
 
       if (code === DisconnectReason.loggedOut) {
-        console.error(`[WA] Sesión cerrada — necesitás escanear QR de nuevo`);
-        try {
-          await iniciarCliente(callbacks);
-        } catch (err) {
-          console.error(`[WA] Error reintentando:`, err.message);
-        }
+        console.error(`[WA] Sesión cerrada por WhatsApp — borrando creds inválidas y pidiendo QR nuevo`);
+        try { await limpiarAuth(); } catch (err) { console.error(`[WA] Error limpiando auth:`, err.message); }
+        setTimeout(() => {
+          iniciarCliente(callbacks).catch((err) => console.error(`[WA] Error reintentando tras loggedOut:`, err.message));
+        }, 3000);
         return;
       }
 
-      // 440 = otra instancia tomó la sesión (deploy solapado). Ceder sin pelear.
+      // 440 = otra instancia tomó la sesión (típicamente deploy solapado en Render).
+      // En vez de retirarse para siempre, esperar 60s y reintentar — para entonces
+      // la otra instancia ya debería haber muerto y esta puede retomar la sesión.
       if (code === 440) {
-        console.warn(`[WA] Conflicto de sesión — otra instancia activa, esta se retira`);
+        console.warn(`[WA] Conflicto de sesión (440) — otra instancia activa, esperando 60s para reintentar`);
+        setTimeout(() => {
+          iniciarCliente(callbacks).catch((err) => console.error(`[WA] Error reintentando tras 440:`, err.message));
+        }, 60000);
         return;
       }
 
-      console.log(`[WA] Reintentando conexión en 3s...`);
+      // Backoff exponencial para reintentos genéricos: 3s, 10s, 30s, luego cada 60s
+      const delay = code === DisconnectReason.connectionReplaced ? 30000 : 3000;
+      console.log(`[WA] Reintentando conexión en ${delay / 1000}s...`);
       setTimeout(() => {
         iniciarCliente(callbacks).catch((err) =>
           console.error(`[WA] Error reintentando:`, err.message)
         );
-      }, 3000);
+      }, delay);
     }
   });
 

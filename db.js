@@ -25,6 +25,9 @@ async function conectar() {
       creado_en   INTEGER DEFAULT (unixepoch())
     );
 
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mensajes_dedup
+      ON mensajes (chat_id, remitente_id, timestamp, cuerpo);
+
     CREATE TABLE IF NOT EXISTS wa_auth (
       key        TEXT PRIMARY KEY,
       value      TEXT NOT NULL,
@@ -37,13 +40,15 @@ async function conectar() {
 
 async function guardarMensaje({ chatId, chatNombre, remitente, remitenteId, cuerpo, timestamp, esVip, tieneKeyword }) {
   try {
-    await db.execute({
-      sql: `INSERT INTO mensajes (chat_id, chat_nombre, remitente, remitente_id, cuerpo, timestamp, es_vip, tiene_keyword)
+    const result = await db.execute({
+      sql: `INSERT OR IGNORE INTO mensajes (chat_id, chat_nombre, remitente, remitente_id, cuerpo, timestamp, es_vip, tiene_keyword)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [chatId, chatNombre ?? null, remitente ?? null, remitenteId ?? null, cuerpo, timestamp, esVip ? 1 : 0, tieneKeyword ? 1 : 0],
     });
+    return result.rowsAffected > 0;
   } catch (err) {
     console.error(`[DB] Error al guardar mensaje de ${chatId}:`, err.message);
+    return false;
   }
 }
 
