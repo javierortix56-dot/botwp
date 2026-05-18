@@ -501,59 +501,59 @@ async function resumenPeriodo(horas) {
   // Agrupar mensajes grupales por chat_id y analizar cada chat por separado
   const porChat = new Map();
   for (const m of grupales) {
-    const chatId = m.chat_id;
-    if (!porChat.has(chatId)) porChat.set(chatId, []);
-    porChat.get(chatId).push(m);
+    if (!porChat.has(m.chat_id)) porChat.set(m.chat_id, []);
+    porChat.get(m.chat_id).push(m);
   }
 
-  const resumenesChats = []; // { chatNombre, temas }
+  const resumenesChats = [];
   for (const [chatId, mensajesChat] of porChat) {
     const chatNombre = mensajesChat[0].chat_nombre || chatId;
     console.log(`[Resumen ${labelHoras}] Analizando "${chatNombre}" (${mensajesChat.length} mensajes)`);
     try {
       const { temas } = await analizarChat(chatNombre, mensajesChat);
-      if (temas.length) {
-        resumenesChats.push({ chatNombre, temas });
-      }
+      if (temas.length) resumenesChats.push({ chatNombre, temas });
     } catch (err) {
       console.error(`[Resumen ${labelHoras}] Error analizando "${chatNombre}":`, err.message);
     }
   }
 
-  // Analizar individuales
   let resIndiv = { eventos: [], compromisos: [], pedidos: [] };
   if (individuales.length) {
-    try {
-      resIndiv = await analizarIndividuales(individuales);
-    } catch (err) {
-      console.error(`[Resumen ${labelHoras}] Error analizando individuales:`, err.message);
+    try { resIndiv = await analizarIndividuales(individuales); } catch (err) { console.error(`[Resumen ${labelHoras}] Error analizando individuales:`, err.message); }
+  }
+
+  // Armar un único mensaje con todo el resumen
+  const lineas = [
+    `📋 *Resumen últimas ${labelHoras}*`,
+    `_${todos.length} mensajes — ${grupales.length} grupales, ${individuales.length} individuales_`,
+  ];
+
+  if (resumenesChats.length) {
+    for (const { chatNombre, temas } of resumenesChats) {
+      lineas.push('');
+      lineas.push(formatearResumenChat(chatNombre, temas));
     }
   }
 
-  // Enviar un mensaje por chat grupal (si tiene temas)
-  const header = `📋 *Resumen últimas ${labelHoras}*\n_${todos.length} mensajes — ${grupales.length} grupales, ${individuales.length} individuales_\n`;
-  try { await enviarTextoLibre(header); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando header:`, err.message); }
-
-  for (const { chatNombre, temas } of resumenesChats) {
-    const texto = formatearResumenChat(chatNombre, temas);
-    if (texto) {
-      try { await enviarTextoLibre(texto); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando resumen de "${chatNombre}":`, err.message); }
-    }
-  }
-
-  // Enviar resumen de individuales si hay algo
   if (resIndiv.eventos.length || resIndiv.compromisos.length || resIndiv.pedidos.length) {
-    const textoIndiv = formatearResumenIndividuales(resIndiv.eventos, resIndiv.compromisos, resIndiv.pedidos);
-    try { await enviarTextoLibre(textoIndiv); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando individuales:`, err.message); }
+    lineas.push('');
+    lineas.push(formatearResumenIndividuales(resIndiv.eventos, resIndiv.compromisos, resIndiv.pedidos));
   }
 
   if (!resumenesChats.length && !resIndiv.eventos.length && !resIndiv.compromisos.length && !resIndiv.pedidos.length) {
-    try { await enviarTextoLibre('_Sin temas relevantes en este período._'); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando sin-temas:`, err.message); }
+    lineas.push('');
+    lineas.push('_Sin temas relevantes en este período._');
   }
 
-  const totalTemas = resumenesChats.reduce((acc, r) => acc + r.temas.length, 0);
-  console.log(`[Resumen ${labelHoras}] Enviado — ${resumenesChats.length} chats con temas, ${totalTemas} temas totales`);
-  postNtfy(`Resumen ${labelHoras}`, `${resumenesChats.length} chats con temas, ${totalTemas} temas`);
+  const texto = lineas.join('\n');
+  try {
+    await enviarTextoLibre(texto);
+    const totalTemas = resumenesChats.reduce((acc, r) => acc + r.temas.length, 0);
+    console.log(`[Resumen ${labelHoras}] Enviado — ${resumenesChats.length} chats con temas, ${totalTemas} temas totales`);
+    postNtfy(`Resumen ${labelHoras}`, texto.replace(/\*/g, '').replace(/_/g, ''));
+  } catch (err) {
+    console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message);
+  }
 }
 
 /**
