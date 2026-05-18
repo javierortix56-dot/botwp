@@ -36,33 +36,30 @@ Respondé SOLO con JSON válido, sin texto extra:
 [{"tema":"<2-4 palabras>","resumen":"<qué pasa con datos concretos>","tipo":"<accion|pago|evento|info>","de":"<nombre del remitente>","me_piden":false,"accion":"<qué debe hacer el dueño exactamente, o null>","ids":[<id>,…]}]
 Si todo es spam/saludos/irrelevante: []`;
 
-const PROMPT_INDIVIDUALES = `Sos un asistente que analiza chats individuales de WhatsApp para su dueño y le reporta qué tiene pendiente.
+const PROMPT_INDIVIDUALES = `Analizás chats 1-a-1 de WhatsApp. Todos los mensajes que recibís son de la otra persona dirigidos al dueño del teléfono.
+[CONTEXTO_DUENO]
 
-Tu tarea es identificar tres tipos de cosas en las conversaciones:
+Identificá solo lo que impacta directamente en el dueño:
 
-1. EVENTOS: cosas con fecha/hora — turnos médicos, reuniones, citas, plazos, vencimientos, cumpleaños, entregas
-2. COMPROMISOS: cosas que el dueño prometió hacer, quedó en hacer, o tiene pendiente resolver
-3. PEDIDOS: cosas que otras personas le están pidiendo al dueño — responder algo, hacer algo, enviar algo, decidir algo
+1. EVENTOS: solo fechas donde el dueño debe estar presente o actuar — su propio turno médico, una entrega que va a recibir, un vencimiento que le aplica, una reunión a la que debe ir. NO incluyas eventos de la vida de la otra persona aunque los mencione ("llevo a mi mamá al médico" no es un evento del dueño).
 
-DIFERENCIA CLAVE:
-- "compromisos" = el dueño tomó una iniciativa o prometió algo ("voy a mandar el presupuesto", "te confirmo mañana")
-- "pedidos" = alguien le pide algo al dueño ("necesito que me pases X", "podés revisar Y?", "cuándo me mandás Z?")
+2. COMPROMISOS: cosas que el dueño prometió o tiene pendiente hacer. Sé muy específico — qué exactamente y para cuándo. Nunca escribas cosas vagas como "resolver algo" o "confirmar algo" sin aclarar QUÉ.
+
+3. PEDIDOS: cosas concretas que la otra persona le está pidiendo al dueño en esa conversación. Cada pedido distinto va separado. Solo incluí pedidos reales — preguntas dirigidas al dueño que esperan respuesta o acción.
 
 REGLAS:
-- Ignorá completamente: saludos, chistes, conversación social sin peso, stickers, GIFs, audios cortos de cortesía
-- Sé preciso — indicá exactamente qué, para quién, y cuándo si aplica
-- Para eventos: extraé fecha y hora en formato ISO 8601 (YYYY-MM-DD HH:MM). Si la fecha es relativa ("mañana", "el viernes"), convertíla usando la fecha de hoy
-- Si el mismo chat tiene varios pedidos, listálos por separado
-- Sé conservador — solo lo que realmente importa o requiere acción
+- Ignorá: saludos, chistes, conversación social, info sobre la vida de la otra persona sin impacto en el dueño, stickers, GIFs
+- Para eventos: fecha ISO 8601 (YYYY-MM-DD o YYYY-MM-DD HH:MM). Si es relativa ("mañana"), convertíla usando la fecha de hoy
+- Sé conservador — solo lo que realmente requiere atención del dueño
 
 Respondé SOLO con un objeto JSON válido, sin texto extra:
 {
   "eventos": [{"titulo": "<qué es>", "fecha": "<YYYY-MM-DD HH:MM o YYYY-MM-DD>", "chat": "<de quién>", "detalle": "<contexto concreto>"}],
-  "compromisos": [{"tema": "<2-4 palabras>", "resumen": "<qué quedó pendiente y para cuándo>", "chat": "<con quién>"}],
-  "pedidos": [{"de": "<nombre de la persona>", "pedido": "<qué pide exactamente>", "chat": "<contacto>", "contexto": "<contexto breve para entender de qué trata>"}]
+  "compromisos": [{"tema": "<2-4 palabras específicas>", "resumen": "<qué exactamente quedó pendiente y para cuándo>", "chat": "<con quién>"}],
+  "pedidos": [{"de": "<nombre de la persona>", "pedido": "<qué pide exactamente>", "chat": "<contacto>", "contexto": "<contexto breve>"}]
 }
 
-Si no hay nada relevante: {"eventos": [], "compromisos": [], "pedidos": []}`;
+Si no hay nada relevante para el dueño: {"eventos": [], "compromisos": [], "pedidos": []}`;
 
 async function callGemini(prompt, intento = 1) {
   try {
@@ -115,12 +112,26 @@ async function resumirBatchGrupos(mensajes) {
   return JSON.parse(match[0]);
 }
 
-async function resumirBatchIndividuales(mensajes, hoy) {
+function resolverNombreContacto(m, contactos) {
+  if (m.remitente && !m.remitente.includes('@')) return m.remitente;
+  const jid = m.remitente_id || m.chat_id || '';
+  const desdeAgenda = contactos.get(jid);
+  if (desdeAgenda) return desdeAgenda;
+  if (jid.includes('@')) {
+    const num = jid.split('@')[0];
+    return num.match(/^\d+$/) ? `+${num}` : jid;
+  }
+  return jid || 'Desconocido';
+}
+
+async function resumirBatchIndividuales(mensajes, hoy, contactos = new Map()) {
   const lista = mensajes
-    .map((m) => `ID ${m.id} | De: ${m.remitente ?? m.remitente_id}\nMensaje: ${m.cuerpo}`)
+    .map((m) => `ID ${m.id} | De: ${resolverNombreContacto(m, contactos)}\nMensaje: ${m.cuerpo}`)
     .join('\n---\n');
 
-  const texto = await callGemini(`${PROMPT_INDIVIDUALES}\n\nFecha de hoy: ${hoy}\n\nMensajes:\n${lista}`);
+  const contextoDueno = buildContextoDueno();
+  const prompt = PROMPT_INDIVIDUALES.replace('[CONTEXTO_DUENO]', contextoDueno);
+  const texto = await callGemini(`${prompt}\n\nFecha de hoy: ${hoy}\n\nMensajes:\n${lista}`);
   const match = texto.match(/\{[\s\S]*\}/);
   if (!match) throw new Error(`Respuesta inesperada: ${texto.slice(0, 200)}`);
   return JSON.parse(match[0]);
@@ -193,7 +204,7 @@ async function analizarMensajes(mensajes) {
   return { temas, idsProcesados };
 }
 
-async function analizarIndividuales(mensajes) {
+async function analizarIndividuales(mensajes, contactos = new Map()) {
   if (!mensajes.length) return { eventos: [], compromisos: [], pedidos: [], idsProcesados: [] };
   const eventos = [];
   const compromisos = [];
@@ -209,7 +220,7 @@ async function analizarIndividuales(mensajes) {
     console.log(`[Gemini] Analizando individuales batch ${numBatch}/${totalBatches} (${batch.length} mensajes)`);
 
     try {
-      const resultado = await resumirBatchIndividuales(batch, hoy);
+      const resultado = await resumirBatchIndividuales(batch, hoy, contactos);
       eventos.push(...(resultado.eventos || []));
       compromisos.push(...(resultado.compromisos || []));
       pedidos.push(...(resultado.pedidos || []));

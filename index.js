@@ -72,42 +72,64 @@ function notificarNtfy(temas) {
   postNtfy(`Resumen grupos - ${temas.length} tema${temas.length > 1 ? 's' : ''}`, resumen);
 }
 
-function formatearResumenIndividuales(eventos, compromisos, pedidos) {
-  const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-  const lineas = [`\u{1F4F1} *Resumen diario ${hora}*\n`];
-  if (eventos.length) {
-    lineas.push('\u{1F4C5} *EVENTOS*');
-    eventos.forEach((e) => {
-      lineas.push(`• ${e.fecha} — ${e.titulo} (${e.chat})`);
-      if (e.detalle) lineas.push(`  ${e.detalle}`);
-    });
+function resolverNombreIndiv(raw, contactos) {
+  if (!raw) return 'Desconocido';
+  if (raw.includes('@')) {
+    const desdeAgenda = contactos.get(raw);
+    if (desdeAgenda) return desdeAgenda;
+    const num = raw.split('@')[0];
+    return num.match(/^\d+$/) ? `+${num}` : raw;
   }
-  if (pedidos.length) {
-    if (lineas.length > 1) lineas.push('');
-    lineas.push('\u{1F4EC} *TE PIDEN*');
-    pedidos.forEach((p) => {
-      lineas.push(`• *${p.de}*: ${p.pedido}`);
-      if (p.contexto) lineas.push(`  ${p.contexto}`);
-    });
-  }
-  if (compromisos.length) {
-    if (lineas.length > 1) lineas.push('');
-    lineas.push('✅ *TUS PENDIENTES*');
-    compromisos.forEach((c) => {
-      lineas.push(`• *${c.tema}* (${c.chat})`);
-      lineas.push(`  ${c.resumen}`);
-    });
-  }
-  return lineas.join('\n');
+  return raw;
 }
 
-function notificarCalendario(eventos, compromisos, pedidos) {
+function formatearResumenIndividuales(eventos, compromisos, pedidos, contactos = new Map()) {
+  const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+  const lineas = ['\u{1F4F1} *Resumen diario ' + hora + '*\n'];
+
+  // Agrupar todo por nombre de contacto/chat
+  const porChat = new Map();
+  const agregar = (rawChat, tipo, item) => {
+    const nombre = resolverNombreIndiv(rawChat, contactos);
+    if (!porChat.has(nombre)) porChat.set(nombre, { eventos: [], pedidos: [], compromisos: [] });
+    porChat.get(nombre)[tipo].push(item);
+  };
+
+  eventos.forEach((e) => agregar(e.chat, 'eventos', e));
+  pedidos.forEach((p) => agregar(p.chat || p.de, 'pedidos', p));
+  compromisos.forEach((c) => agregar(c.chat, 'compromisos', c));
+
+  if (!porChat.size) {
+    lineas.push('_Sin novedades importantes._');
+    return lineas.join('\n');
+  }
+
+  for (const [chatNombre, items] of porChat) {
+    lineas.push(`\u{1F464} *${chatNombre}*`);
+    items.eventos.forEach((e) => {
+      lineas.push(`  \u{1F4C5} ${e.fecha} — ${e.titulo}`);
+      if (e.detalle) lineas.push(`    ${e.detalle}`);
+    });
+    items.pedidos.forEach((p) => {
+      lineas.push(`  \u{1F4EC} ${p.pedido}`);
+      if (p.contexto) lineas.push(`    ${p.contexto}`);
+    });
+    items.compromisos.forEach((c) => {
+      lineas.push(`  ✅ *${c.tema}*: ${c.resumen}`);
+    });
+    lineas.push('');
+  }
+
+  return lineas.join('\n').trimEnd();
+}
+
+function notificarCalendario(eventos, compromisos, pedidos, contactos = new Map()) {
   if (!eventos.length && !compromisos.length && !pedidos.length) return;
   const lineas = [];
   if (eventos.length) {
     lineas.push('EVENTOS:');
     eventos.forEach((e) => {
-      lineas.push(`- ${e.fecha} | ${e.titulo} (${e.chat})`);
+      lineas.push(`- ${e.fecha} | ${e.titulo} (${resolverNombreIndiv(e.chat, contactos)})`);
       if (e.detalle) lineas.push(`  ${e.detalle}`);
     });
   }
@@ -115,7 +137,7 @@ function notificarCalendario(eventos, compromisos, pedidos) {
     if (lineas.length) lineas.push('');
     lineas.push('TE PIDEN:');
     pedidos.forEach((p) => {
-      lineas.push(`- ${p.de}: ${p.pedido} (${p.chat})`);
+      lineas.push(`- ${resolverNombreIndiv(p.de, contactos)}: ${p.pedido}`);
       if (p.contexto) lineas.push(`  ${p.contexto}`);
     });
   }
@@ -123,8 +145,7 @@ function notificarCalendario(eventos, compromisos, pedidos) {
     if (lineas.length) lineas.push('');
     lineas.push('TUS PENDIENTES:');
     compromisos.forEach((c) => {
-      lineas.push(`- ${c.tema} (${c.chat})`);
-      lineas.push(`  ${c.resumen}`);
+      lineas.push(`- ${c.tema} (${resolverNombreIndiv(c.chat, contactos)}): ${c.resumen}`);
     });
   }
   const total = eventos.length + compromisos.length + pedidos.length;
@@ -517,9 +538,11 @@ async function resumenPeriodo(horas) {
     }
   }
 
+  const contactos = await obtenerContactos().catch(() => new Map());
+
   let resIndiv = { eventos: [], compromisos: [], pedidos: [] };
   if (individuales.length) {
-    try { resIndiv = await analizarIndividuales(individuales); } catch (err) { console.error(`[Resumen ${labelHoras}] Error analizando individuales:`, err.message); }
+    try { resIndiv = await analizarIndividuales(individuales, contactos); } catch (err) { console.error(`[Resumen ${labelHoras}] Error analizando individuales:`, err.message); }
   }
 
   // Armar un único mensaje con todo el resumen
@@ -537,7 +560,7 @@ async function resumenPeriodo(horas) {
 
   if (resIndiv.eventos.length || resIndiv.compromisos.length || resIndiv.pedidos.length) {
     lineas.push('');
-    lineas.push(formatearResumenIndividuales(resIndiv.eventos, resIndiv.compromisos, resIndiv.pedidos));
+    lineas.push(formatearResumenIndividuales(resIndiv.eventos, resIndiv.compromisos, resIndiv.pedidos, contactos));
   }
 
   if (!resumenesChats.length && !resIndiv.eventos.length && !resIndiv.compromisos.length && !resIndiv.pedidos.length) {
@@ -634,10 +657,11 @@ async function procesarMensajesIndividuales() {
     const individuales = todos.filter((m) => !m.chat_id?.endsWith('@g.us'));
     console.log(`[Cron individuales] ${individuales.length} mensajes individuales sin procesar`);
     if (!individuales.length) { console.log(`[Cron individuales] Nada que analizar`); return; }
-    const { eventos, compromisos, pedidos, idsProcesados } = await analizarIndividuales(individuales);
-    notificarCalendario(eventos, compromisos, pedidos);
+    const contactos = await obtenerContactos().catch(() => new Map());
+    const { eventos, compromisos, pedidos, idsProcesados } = await analizarIndividuales(individuales, contactos);
+    notificarCalendario(eventos, compromisos, pedidos, contactos);
     if (eventos.length || compromisos.length || pedidos.length) {
-      const texto = formatearResumenIndividuales(eventos, compromisos, pedidos);
+      const texto = formatearResumenIndividuales(eventos, compromisos, pedidos, contactos);
       try { await enviarTextoLibre(texto); } catch (err) { console.error(`[Cron individuales] Error enviando a WA:`, err.message); }
     }
     await marcarProcesados(idsProcesados);
