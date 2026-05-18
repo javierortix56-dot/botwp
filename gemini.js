@@ -102,8 +102,9 @@ async function resumirBatchIndividuales(mensajes, hoy) {
 }
 
 async function analizarMensajes(mensajes) {
-  if (!mensajes.length) return [];
+  if (!mensajes.length) return { temas: [], idsProcesados: [] };
   const temas = [];
+  const idsProcesados = [];
 
   for (let i = 0; i < mensajes.length; i += BATCH_SIZE) {
     const batch = mensajes.slice(i, i + BATCH_SIZE);
@@ -115,20 +116,22 @@ async function analizarMensajes(mensajes) {
     try {
       const resultado = await resumirBatchGrupos(batch);
       temas.push(...resultado);
+      idsProcesados.push(...batch.map((m) => m.id));
       console.log(`[Gemini] Batch ${numBatch} OK — ${resultado.length} temas`);
     } catch (err) {
       console.error(`[Gemini] Error en batch ${numBatch}:`, err.message);
     }
   }
 
-  return temas;
+  return { temas, idsProcesados };
 }
 
 async function analizarIndividuales(mensajes) {
-  if (!mensajes.length) return { eventos: [], compromisos: [], pedidos: [] };
+  if (!mensajes.length) return { eventos: [], compromisos: [], pedidos: [], idsProcesados: [] };
   const eventos = [];
   const compromisos = [];
   const pedidos = [];
+  const idsProcesados = [];
   const hoy = new Date().toISOString().slice(0, 10);
 
   for (let i = 0; i < mensajes.length; i += BATCH_SIZE) {
@@ -143,13 +146,14 @@ async function analizarIndividuales(mensajes) {
       eventos.push(...(resultado.eventos || []));
       compromisos.push(...(resultado.compromisos || []));
       pedidos.push(...(resultado.pedidos || []));
+      idsProcesados.push(...batch.map((m) => m.id));
       console.log(`[Gemini] Batch ${numBatch} OK — ${resultado.eventos?.length || 0} eventos, ${resultado.compromisos?.length || 0} compromisos, ${resultado.pedidos?.length || 0} pedidos`);
     } catch (err) {
       console.error(`[Gemini] Error en batch ${numBatch}:`, err.message);
     }
   }
 
-  return { eventos, compromisos, pedidos };
+  return { eventos, compromisos, pedidos, idsProcesados };
 }
 
 const PROMPT_PRECIOS = `Sos un asistente que analiza precios de supermercados para optimizar las compras de una familia argentina.

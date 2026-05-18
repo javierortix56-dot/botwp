@@ -2,7 +2,7 @@ global.crypto = require('crypto').webcrypto;
 
 require('dotenv').config();
 
-const REQUIRED_ENV = ['GEMINI_API_KEY', 'TURSO_URL', 'TURSO_TOKEN', 'MY_WHATSAPP_ID', 'NTFY_TOPIC'];
+const REQUIRED_ENV = ['GEMINI_API_KEY', 'TURSO_URL', 'TURSO_TOKEN', 'MY_WHATSAPP_ID'];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
 if (missing.length) {
   console.error(`[Bot] Faltan variables de entorno: ${missing.join(', ')}`);
@@ -285,12 +285,12 @@ async function procesarMensajesGrupos() {
     const grupales = todos.filter((m) => m.chat_id?.endsWith('@g.us'));
     console.log(`[Cron grupos] ${grupales.length} mensajes grupales sin procesar`);
     if (!grupales.length) { console.log(`[Cron grupos] Nada que analizar`); return; }
-    const resultados = await analizarMensajes(grupales);
-    await enviarResumen(grupales, resultados);
-    notificarNtfy(resultados);
-    const ids = grupales.map((m) => m.id);
-    await marcarProcesados(ids);
-    console.log(`[Cron grupos] Completo — ${resultados.length} temas, ${ids.length} mensajes procesados`);
+    const { temas, idsProcesados } = await analizarMensajes(grupales);
+    await enviarResumen(grupales, temas);
+    notificarNtfy(temas);
+    await marcarProcesados(idsProcesados);
+    const fallidos = grupales.length - idsProcesados.length;
+    console.log(`[Cron grupos] Completo — ${temas.length} temas, ${idsProcesados.length} mensajes procesados${fallidos > 0 ? `, ${fallidos} quedaron pendientes para el próximo ciclo` : ''}`);
   } catch (err) {
     console.error(`[Cron grupos] Error:`, err.message);
   }
@@ -304,15 +304,15 @@ async function procesarMensajesIndividuales() {
     const individuales = todos.filter((m) => !m.chat_id?.endsWith('@g.us'));
     console.log(`[Cron individuales] ${individuales.length} mensajes individuales sin procesar`);
     if (!individuales.length) { console.log(`[Cron individuales] Nada que analizar`); return; }
-    const { eventos, compromisos, pedidos } = await analizarIndividuales(individuales);
+    const { eventos, compromisos, pedidos, idsProcesados } = await analizarIndividuales(individuales);
     notificarCalendario(eventos, compromisos, pedidos);
     if (eventos.length || compromisos.length || pedidos.length) {
       const texto = formatearResumenIndividuales(eventos, compromisos, pedidos);
       try { await enviarTextoLibre(texto); } catch (err) { console.error(`[Cron individuales] Error enviando a WA:`, err.message); }
     }
-    const ids = individuales.map((m) => m.id);
-    await marcarProcesados(ids);
-    console.log(`[Cron individuales] Completo — ${eventos.length} eventos, ${compromisos.length} compromisos, ${pedidos.length} pedidos, ${ids.length} mensajes procesados`);
+    await marcarProcesados(idsProcesados);
+    const fallidos = individuales.length - idsProcesados.length;
+    console.log(`[Cron individuales] Completo — ${eventos.length} eventos, ${compromisos.length} compromisos, ${pedidos.length} pedidos, ${idsProcesados.length} mensajes procesados${fallidos > 0 ? `, ${fallidos} quedaron pendientes para el próximo ciclo` : ''}`);
   } catch (err) {
     console.error(`[Cron individuales] Error:`, err.message);
   }
@@ -338,6 +338,10 @@ async function main() {
       onQR: (qr) => { estadoWA = 'qr'; qrActual = qr; tsAutenticando = null; console.log(`[WA] QR listo — abrí https://botwp-ikbb.onrender.com para escanearlo`); },
       onAutenticando: () => { estadoWA = 'autenticando'; qrActual = null; tsAutenticando = Date.now(); console.log(`[WA] QR escaneado — autenticando...`); },
       onListo: () => { const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : '?'; estadoWA = 'conectado'; qrActual = null; console.log(`[WA] ¡Listo! Conectado en ${segs}s`); },
+      onDesconectado: (code) => {
+        if (code === 401 || code === 403) { estadoWA = 'qr'; qrActual = null; return; }
+        if (estadoWA === 'conectado') estadoWA = 'autenticando';
+      },
     });
   } catch (err) {
     console.error(`[Bot] No se pudo inicializar WhatsApp:`, err.message);
