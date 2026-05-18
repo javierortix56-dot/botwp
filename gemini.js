@@ -63,9 +63,20 @@ Respondé SOLO con un objeto JSON válido, sin texto extra:
 
 Si no hay nada relevante: {"eventos": [], "compromisos": [], "pedidos": []}`;
 
-async function callGemini(prompt) {
-  const result = await model.generateContent(prompt);
-  return result.response.text().trim();
+async function callGemini(prompt, intento = 1) {
+  try {
+    const result = await model.generateContent(prompt);
+    return result.response.text().trim();
+  } catch (err) {
+    const es503 = err.message?.includes('503') || err.message?.includes('Service Unavailable') || err.message?.includes('high demand');
+    if (es503 && intento < 4) {
+      const espera = intento === 1 ? 5000 : intento === 2 ? 15000 : 45000;
+      console.warn(`[Gemini] 503 en intento ${intento}, reintentando en ${espera / 1000}s...`);
+      await new Promise((r) => setTimeout(r, espera));
+      return callGemini(prompt, intento + 1);
+    }
+    throw err;
+  }
 }
 
 async function resumirBatchGrupos(mensajes) {
