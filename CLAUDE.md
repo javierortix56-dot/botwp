@@ -5,8 +5,8 @@ Bot de WhatsApp que monitorea mensajes cada hora, analiza con Gemini si son impo
 
 ## Stack — no cambiar sin preguntar
 - Node.js (CommonJS, no ESModules)
-- whatsapp-web.js para automatizar WhatsApp
-- @google/generative-ai para Gemini 2.0 Flash
+- @whiskeysockets/baileys para automatizar WhatsApp
+- @google/generative-ai para Gemini 2.5 Flash Lite
 - @libsql/client para Turso (base de datos)
 - node-cron para el scheduler cada hora
 - dotenv para variables de entorno
@@ -51,5 +51,5 @@ config.json    → configuración editable por el usuario
 ## Lo que NO hace este bot
 - No responde mensajes automáticamente
 - No monitorea todos los chats, solo los de config.json
-- No usa WhatsApp Business API (usa whatsapp-web.js)
-- No tiene interfaz web ni dashboard
+- No usa WhatsApp Business API (usa Baileys)
+- No compara precios ni busca productos en supermercados

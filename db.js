@@ -80,6 +80,19 @@ async function obtenerMensajesSinProcesar() {
   }
 }
 
+async function obtenerMensajesDesde(timestampDesde) {
+  try {
+    const result = await db.execute({
+      sql: `SELECT * FROM mensajes WHERE timestamp >= ? ORDER BY timestamp ASC`,
+      args: [timestampDesde],
+    });
+    return result.rows;
+  } catch (err) {
+    console.error(`[DB] Error al leer mensajes desde ${timestampDesde}:`, err.message);
+    return [];
+  }
+}
+
 async function marcarProcesados(ids) {
   if (!ids.length) return;
   try {
@@ -166,6 +179,7 @@ module.exports = {
   conectar,
   guardarMensaje,
   obtenerMensajesSinProcesar,
+  obtenerMensajesDesde,
   marcarProcesados,
   useTursoAuthState,
   limpiarAuth,

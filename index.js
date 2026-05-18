@@ -12,10 +12,9 @@ if (missing.length) {
 const http = require('http');
 const cron = require('node-cron');
 const QRCode = require('qrcode');
-const { conectar, obtenerMensajesSinProcesar, marcarProcesados, guardarMensaje, limpiarAuth } = require('./db');
+const { conectar, obtenerMensajesSinProcesar, obtenerMensajesDesde, marcarProcesados, guardarMensaje, limpiarAuth } = require('./db');
 const { iniciarCliente, enviarResumen, enviarTextoLibre } = require('./whatsapp');
-const { analizarMensajes, analizarIndividuales, analizarPrecios, analizarProductoDetallado } = require('./gemini');
-const { buscarTodos, buscarProductoDetallado, buscarDesdeUrls } = require('./precios');
+const { analizarMensajes, analizarIndividuales } = require('./gemini');
 const config = require('./config.json');
 
 const https = require('https');
@@ -140,32 +139,17 @@ function iniciarServidor() {
       return;
     }
 
-    if (req.url?.startsWith('/buscar') && req.method === 'GET') {
+    if (req.url?.startsWith('/resumen') && req.method === 'GET') {
       if (estadoWA !== 'conectado') { res.end(`<p>El bot no est&#225; conectado.</p>`); return; }
       const params = new URL(req.url, `http://localhost`).searchParams;
-      const query = params.get('q')?.trim();
-      if (!query) {
-        res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:sans-serif;text-align:center;padding:40px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:480px;margin:0 auto;padding:32px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><h2>&#128269; Buscar producto</h2><form method="get" action="/buscar" style="margin-top:20px"><input name="q" placeholder="nombre del producto o URL de Jumbo" style="width:100%;box-sizing:border-box;padding:12px;border:1px solid #ddd;border-radius:6px;font-size:1rem;margin-bottom:12px"><button type="submit" style="width:100%;padding:12px;background:#e67e22;color:#fff;border:none;border-radius:6px;font-size:1rem;cursor:pointer">Buscar en Carrefour, Jumbo y Coto</button></form><p style="color:#888;font-size:.8rem;margin-top:16px">Pod&#233;s pegar el nombre del producto o una URL de jumbo.com.ar</p><a href="/" style="font-size:.85rem;color:#555">&#8592; Volver</a></div></body></html>`);
+      const horas = Number(params.get('h')) || 24;
+      if (![24, 72, 168].includes(horas)) {
+        res.end(`<p>Per&#237;odo inv&#225;lido. Us&#225; h=24, h=72 o h=168.</p>`);
         return;
       }
-      (async () => {
-        try {
-          const resultados = await buscarProductoDetallado(query);
-          const analisis = formatearBusqueda(resultados);
-          postNtfy('Busqueda producto', analisis.replace(/\*/g, '').replace(/_/g, ''));
-          await enviarTextoLibre(analisis);
-        } catch (err) {
-          console.error('[Buscar]', err.message);
-        }
-      })();
-      res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:420px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><div style="font-size:3rem;margin-bottom:16px">&#128269;</div><h2 style="margin:0 0 12px">Buscando &quot;${query}&quot;...</h2><p style="color:#555">Comparando en Carrefour, Jumbo y Coto incluyendo todas las presentaciones.</p><p style="color:#888;font-size:.85rem;margin-top:16px">En ~30 segundos recibi&#769;s el resultado en WhatsApp y ntfy.</p><a href="/buscar" style="display:inline-block;margin-top:24px;padding:10px 24px;background:#e67e22;color:#fff;border-radius:6px;text-decoration:none">Nueva b&#250;squeda</a></div></body></html>`);
-      return;
-    }
-
-    if (req.url === '/precios' && req.method === 'GET') {
-      if (estadoWA !== 'conectado') { res.end(`<p>El bot no est&#225; conectado.</p>`); return; }
-      buscarYCompararPrecios().catch((err) => console.error('[Precios]', err.message));
-      res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Buscando precios...</title></head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:420px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><div style="font-size:3rem;margin-bottom:16px">&#128722;</div><h2 style="margin:0 0 12px">Buscando precios...</h2><p style="color:#555">Comparando ${(config.lista_compras || []).length} productos en Carrefour, Jumbo y Coto.</p><p style="color:#888;font-size:.85rem;margin-top:16px">En ~60 segundos recibi&#769;s el resultado en WhatsApp y ntfy.</p><a href="/" style="display:inline-block;margin-top:24px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none">Volver al inicio</a></div></body></html>`);
+      resumenPeriodo(horas).catch((err) => console.error(`[Resumen ${horas}h]`, err.message));
+      const label = horas === 24 ? '24 horas' : horas === 72 ? '72 horas' : '7 d&#237;as';
+      res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Resumen ${label}</title></head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:420px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><div style="font-size:3rem;margin-bottom:16px">&#128203;</div><h2 style="margin:0 0 12px">Generando resumen de las &#250;ltimas ${label}...</h2><p style="color:#555">Analizando mensajes (le&#237;dos y no le&#237;dos) con Gemini.</p><p style="color:#888;font-size:.85rem;margin-top:16px">Recib&#237;s el resultado por WhatsApp en cuanto termine.</p><a href="/" style="display:inline-block;margin-top:24px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none">Volver al inicio</a></div></body></html>`);
       return;
     }
 
@@ -194,7 +178,7 @@ function iniciarServidor() {
     }
 
     if (estadoWA === 'conectado') {
-      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>&#9989; WhatsApp conectado</h2><p>El bot est&#225; activo y escuchando mensajes.</p><p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p><p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Procesar mensajes nuevos</a></p><p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Revisar historial completo</a></p><p><a href="/precios" style="display:inline-block;margin:6px;padding:10px 24px;background:#e67e22;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128722; Comparar lista de compras</a></p><p><a href="/buscar" style="display:inline-block;margin:6px;padding:10px 24px;background:#d35400;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128269; Buscar producto espec&#237;fico</a></p><p style="margin-top:24px"><a href="/limpiar-sesion" style="display:inline-block;margin:6px;padding:8px 20px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem" onclick="return confirm('Borrar sesi&#243;n?')">Limpiar sesi&#243;n y re-sincronizar</a></p></body></html>`);
+      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>&#9989; WhatsApp conectado</h2><p>El bot est&#225; activo y escuchando mensajes.</p><h3 style="margin-top:32px;color:#555">Res&#250;menes por per&#237;odo</h3><p style="color:#888;font-size:.85rem;margin:0 0 12px">Analiza todos los mensajes (le&#237;dos y no le&#237;dos) del per&#237;odo elegido</p><p><a href="/resumen?h=24" style="display:inline-block;margin:6px;padding:10px 24px;background:#27ae60;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 24 horas</a></p><p><a href="/resumen?h=72" style="display:inline-block;margin:6px;padding:10px 24px;background:#16a085;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 72 horas</a></p><p><a href="/resumen?h=168" style="display:inline-block;margin:6px;padding:10px 24px;background:#117a65;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltima semana</a></p><h3 style="margin-top:32px;color:#555">Mantenimiento</h3><p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p><p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Procesar mensajes nuevos (cron manual)</a></p><p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Revisar historial completo</a></p><p style="margin-top:24px"><a href="/limpiar-sesion" style="display:inline-block;margin:6px;padding:8px 20px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem" onclick="return confirm('Borrar sesi&#243;n?')">Limpiar sesi&#243;n y re-sincronizar</a></p></body></html>`);
       return;
     }
 
@@ -236,45 +220,78 @@ function iniciarServidor() {
   });
 }
 
-function formatearBusqueda({ query, carrefour, jumbo, coto }) {
-  const todos = [...(carrefour || []), ...(jumbo || []), ...(coto || [])];
-  if (!todos.length) return `Sin resultados para "${query}".`;
-
-  todos.sort((a, b) => a.precio - b.precio);
-
-  const lineas = [`🔍 *${query}*`, ''];
-  todos.forEach((item, i) => {
-    const corona = i === 0 ? '👑 ' : '';
-    const promo = item.tienePromo ? ` _(antes $${item.precioOriginal.toFixed(0)})_` : '';
-    lineas.push(`${corona}*${item.supermercado}* $${item.precio.toFixed(0)} — ${item.nombre}${promo}`);
-  });
-
-  if (todos.length > 1) {
-    const ahorro = todos[todos.length - 1].precio - todos[0].precio;
-    lineas.push('');
-    lineas.push(`💰 Diferencia: $${ahorro.toFixed(0)}`);
+async function resumenPeriodo(horas) {
+  const labelHoras = horas === 168 ? '7 días' : `${horas}h`;
+  console.log(`\n[Resumen ${labelHoras}] Iniciando...`);
+  const desde = Math.floor(Date.now() / 1000) - horas * 3600;
+  const todos = await obtenerMensajesDesde(desde);
+  if (!todos.length) {
+    console.log(`[Resumen ${labelHoras}] Sin mensajes en el período`);
+    try { await enviarTextoLibre(`📋 *Resumen últimas ${labelHoras}*\n\nNo hay mensajes en este período.`); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message); }
+    return;
   }
+  const grupales = todos.filter((m) => m.chat_id?.endsWith('@g.us'));
+  const individuales = todos.filter((m) => !m.chat_id?.endsWith('@g.us'));
+  console.log(`[Resumen ${labelHoras}] ${todos.length} mensajes — ${grupales.length} grupales, ${individuales.length} individuales`);
 
-  return lineas.join('\n');
+  const [resGrupos, resIndiv] = await Promise.all([
+    grupales.length ? analizarMensajes(grupales) : Promise.resolve({ temas: [] }),
+    individuales.length ? analizarIndividuales(individuales) : Promise.resolve({ eventos: [], compromisos: [], pedidos: [] }),
+  ]);
+
+  const texto = formatearResumenPeriodo(labelHoras, resGrupos.temas, resIndiv.eventos, resIndiv.compromisos, resIndiv.pedidos, { totalMensajes: todos.length, grupales: grupales.length, individuales: individuales.length });
+  try { await enviarTextoLibre(texto); console.log(`[Resumen ${labelHoras}] Enviado a WhatsApp`); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message); }
+  postNtfy(`Resumen ${labelHoras}`, texto.replace(/\*/g, '').replace(/_/g, ''));
 }
 
-async function buscarYCompararPrecios() {
-  const urls = config.lista_compras_urls;
-  const lista = config.lista_compras;
-  const usandoUrls = Array.isArray(urls) && urls.length > 0;
-  if (!usandoUrls && !lista?.length) throw new Error('lista_compras y lista_compras_urls vacías en config.json');
-  const cantidad = usandoUrls ? urls.length : lista.length;
-  console.log(`[Precios] Iniciando búsqueda de ${cantidad} productos (${usandoUrls ? 'URLs' : 'nombres'})...`);
-  const resultados = usandoUrls ? await buscarDesdeUrls(urls) : await buscarTodos(lista);
-  const encontrados = resultados.filter((r) => r.resultados.length > 0).length;
-  console.log(`[Precios] Búsqueda completa — ${encontrados}/${lista.length} productos encontrados`);
-  const analisis = await analizarPrecios(resultados);
-  postNtfy('Comparacion supermercados', analisis.replace(/\*/g, '').replace(/_/g, ''));
-  try {
-    await enviarTextoLibre(analisis);
-  } catch (err) {
-    console.error(`[Precios] Error enviando a WA:`, err.message);
+function formatearResumenPeriodo(label, temas, eventos, compromisos, pedidos, stats) {
+  const lineas = [`📋 *Resumen últimas ${label}*`, `_${stats.totalMensajes} mensajes — ${stats.grupales} grupales, ${stats.individuales} individuales_`, ''];
+
+  if (temas.length) {
+    const orden = { accion: 0, pago: 1, evento: 2, info: 3 };
+    const emoji = { accion: '🔴', pago: '💰', evento: '📅', info: 'ℹ️' };
+    const ordenados = [...temas].sort((a, b) => (orden[a.tipo] ?? 3) - (orden[b.tipo] ?? 3));
+    lineas.push('👥 *GRUPOS*');
+    ordenados.forEach((t) => {
+      lineas.push(`${emoji[t.tipo] || '•'} *${t.tema}* — ${t.chat}`);
+      lineas.push(`  ${t.resumen}`);
+      if (t.accion) lineas.push(`  _→ ${t.accion}_`);
+    });
+    lineas.push('');
   }
+
+  if (eventos.length) {
+    lineas.push('📅 *EVENTOS*');
+    eventos.forEach((e) => {
+      lineas.push(`• ${e.fecha} — ${e.titulo} (${e.chat})`);
+      if (e.detalle) lineas.push(`  ${e.detalle}`);
+    });
+    lineas.push('');
+  }
+
+  if (pedidos.length) {
+    lineas.push('📬 *TE PIDEN*');
+    pedidos.forEach((p) => {
+      lineas.push(`• *${p.de}*: ${p.pedido}`);
+      if (p.contexto) lineas.push(`  ${p.contexto}`);
+    });
+    lineas.push('');
+  }
+
+  if (compromisos.length) {
+    lineas.push('✅ *TUS PENDIENTES*');
+    compromisos.forEach((c) => {
+      lineas.push(`• *${c.tema}* (${c.chat})`);
+      lineas.push(`  ${c.resumen}`);
+    });
+    lineas.push('');
+  }
+
+  if (!temas.length && !eventos.length && !compromisos.length && !pedidos.length) {
+    lineas.push('_Sin temas relevantes en este período._');
+  }
+
+  return lineas.join('\n').trim();
 }
 
 async function procesarMensajesGrupos() {
