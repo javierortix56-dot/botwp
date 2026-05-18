@@ -4,7 +4,7 @@ const {
   fetchLatestBaileysVersion,
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const { guardarMensaje, useTursoAuthState, limpiarAuth } = require('./db');
+const { guardarMensaje, useTursoAuthState, limpiarAuth, guardarContacto } = require('./db');
 const { debeAnalizarse, obtenerFlags } = require('./filtros');
 const config = require('./config.json');
 require('dotenv').config();
@@ -49,9 +49,27 @@ async function iniciarCliente(callbacks = {}) {
 
   sock.ev.on('creds.update', saveCreds);
 
+  // Sincronización de contactos: capturamos los nombres de la agenda
+  // (verifiedName / name / notify) para mostrarlos en /configurar y en los
+  // resúmenes en lugar del JID raw.
+  async function procesarContactos(contactos) {
+    if (!contactos?.length) return;
+    let guardados = 0;
+    for (const c of contactos) {
+      const nombre = c.verifiedName || c.name || c.notify;
+      if (!c.id || !nombre) continue;
+      await guardarContacto(c.id, nombre);
+      guardados++;
+    }
+    if (guardados > 0) console.log(`[WA] ${guardados} contactos sincronizados`);
+  }
+  sock.ev.on('contacts.upsert', procesarContactos);
+  sock.ev.on('contacts.update', procesarContactos);
+
   // Backfill: cuando WhatsApp sincroniza historial, guardamos mensajes recientes
-  // de chats individuales para el resumen diario.
-  sock.ev.on('messaging-history.set', async ({ messages }) => {
+  // de chats individuales para el resumen diario. También extraemos contactos.
+  sock.ev.on('messaging-history.set', async ({ messages, contacts }) => {
+    if (contacts?.length) await procesarContactos(contacts);
     if (!messages?.length) return;
     const dias = config.dias_historial ?? 15;
     const limiteTimestamp = Math.floor(Date.now() / 1000) - dias * 86400;

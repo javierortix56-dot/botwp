@@ -35,6 +35,12 @@ async function conectar() {
       chat_nombre_key TEXT PRIMARY KEY,
       ultimo_procesado INTEGER DEFAULT 0
     );
+
+    CREATE TABLE IF NOT EXISTS contactos (
+      jid          TEXT PRIMARY KEY,
+      nombre       TEXT,
+      updated_at   INTEGER DEFAULT (unixepoch())
+    );
   `);
 
   // Crear índice único para deduplicación. Si ya hay duplicados de antes
@@ -181,6 +187,38 @@ async function actualizarUltimoProcesado(chatNombreKey) {
   }
 }
 
+/**
+ * Guarda o actualiza un contacto (jid → nombre amigable).
+ * Solo actualiza si el nuevo nombre no es vacío.
+ */
+async function guardarContacto(jid, nombre) {
+  if (!jid || !nombre) return;
+  try {
+    await db.execute({
+      sql: `INSERT INTO contactos (jid, nombre, updated_at) VALUES (?, ?, unixepoch())
+            ON CONFLICT(jid) DO UPDATE SET nombre = excluded.nombre, updated_at = unixepoch()`,
+      args: [jid, nombre],
+    });
+  } catch (err) {
+    console.error(`[DB] Error guardando contacto ${jid}:`, err.message);
+  }
+}
+
+/**
+ * Devuelve un Map<jid, nombre> con todos los contactos guardados.
+ */
+async function obtenerContactos() {
+  try {
+    const result = await db.execute(`SELECT jid, nombre FROM contactos`);
+    const mapa = new Map();
+    for (const row of result.rows) mapa.set(row.jid, row.nombre);
+    return mapa;
+  } catch (err) {
+    console.error(`[DB] Error leyendo contactos:`, err.message);
+    return new Map();
+  }
+}
+
 // Auth state para Baileys persistido en Turso.
 // Permite que la sesión sobreviva reinicios del contenedor sin re-escanear QR.
 async function useTursoAuthState() {
@@ -262,4 +300,6 @@ module.exports = {
   obtenerMensajesChatSinProcesar,
   obtenerUltimoProcesado,
   actualizarUltimoProcesado,
+  guardarContacto,
+  obtenerContactos,
 };

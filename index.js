@@ -22,6 +22,7 @@ const {
   guardarMensaje,
   limpiarAuth,
   obtenerChatsDistintos,
+  obtenerContactos,
   obtenerMensajesChatSinProcesar,
   obtenerUltimoProcesado,
   actualizarUltimoProcesado,
@@ -185,7 +186,24 @@ function leerBody(req) {
   });
 }
 
-function generarPaginaConfiguracion(chatsDB, configActual, mensaje) {
+function nombreParaChat(chatId, chatNombreDB, contactos) {
+  // Para grupos, usar el nombre que ya viene de la metadata del grupo
+  if (chatId && chatId.endsWith('@g.us')) {
+    return chatNombreDB || chatId;
+  }
+  // Para individuales/newsletters: priorizar el nombre de la agenda
+  const desdeAgenda = contactos.get(chatId);
+  if (desdeAgenda) return desdeAgenda;
+  if (chatNombreDB && !chatNombreDB.includes('@')) return chatNombreDB;
+  // Fallback: si es un JID raw, mostrar solo el número (más legible)
+  if (chatId && chatId.includes('@')) {
+    const numero = chatId.split('@')[0];
+    return numero.match(/^\d+$/) ? `+${numero}` : (chatNombreDB || chatId);
+  }
+  return chatNombreDB || chatId;
+}
+
+function generarPaginaConfiguracion(chatsDB, configActual, contactos, mensaje) {
   const gruposConfigurados = new Map();
   (configActual.grupos || []).forEach((g) => {
     const nombre = typeof g === 'string' ? g : g.nombre;
@@ -198,13 +216,14 @@ function generarPaginaConfiguracion(chatsDB, configActual, mensaje) {
   const chats = [];
 
   for (const row of chatsDB) {
-    const key = (row.chat_nombre || row.chat_id || '').toLowerCase().trim();
+    const nombreLegible = nombreParaChat(row.chat_id, row.chat_nombre, contactos);
+    const key = nombreLegible.toLowerCase().trim();
     if (!key || chatKeys.has(key)) continue;
     chatKeys.add(key);
     const conf = gruposConfigurados.get(key);
     chats.push({
       chat_id: row.chat_id,
-      chat_nombre: row.chat_nombre || row.chat_id,
+      chat_nombre: nombreLegible,
       cantidad: row.cantidad || 0,
       frecuencia: conf ? conf.frecuencia : 0,
     });
@@ -375,8 +394,8 @@ function iniciarServidor() {
       try {
         const params = new URL(req.url, `http://localhost`).searchParams;
         const mensaje = params.get('ok') ? '✅ Configuración guardada correctamente.' : '';
-        const chatsDB = await obtenerChatsDistintos(30);
-        const html = generarPaginaConfiguracion(chatsDB, config, mensaje);
+        const [chatsDB, contactos] = await Promise.all([obtenerChatsDistintos(30), obtenerContactos()]);
+        const html = generarPaginaConfiguracion(chatsDB, config, contactos, mensaje);
         res.end(html);
       } catch (err) {
         console.error(`[Config] Error generando página:`, err.message);
