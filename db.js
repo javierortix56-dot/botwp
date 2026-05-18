@@ -25,15 +25,31 @@ async function conectar() {
       creado_en   INTEGER DEFAULT (unixepoch())
     );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_mensajes_dedup
-      ON mensajes (chat_id, remitente_id, timestamp, cuerpo);
-
     CREATE TABLE IF NOT EXISTS wa_auth (
       key        TEXT PRIMARY KEY,
       value      TEXT NOT NULL,
       updated_at INTEGER DEFAULT (unixepoch())
     );
   `);
+
+  // Crear índice único para deduplicación. Si ya hay duplicados de antes
+  // del fix, borramos los repetidos (conservando el de menor id) y luego
+  // creamos el índice. Idempotente: si el índice ya existe, no hace nada.
+  try {
+    await db.execute(`
+      DELETE FROM mensajes
+      WHERE id NOT IN (
+        SELECT MIN(id) FROM mensajes
+        GROUP BY chat_id, COALESCE(remitente_id, ''), timestamp, cuerpo
+      )
+    `);
+    await db.execute(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_mensajes_dedup
+        ON mensajes (chat_id, remitente_id, timestamp, cuerpo)
+    `);
+  } catch (err) {
+    console.warn(`[DB] No se pudo crear índice de deduplicación:`, err.message);
+  }
 
   console.log(`[DB] Conectado a Turso y tablas listas`);
 }
