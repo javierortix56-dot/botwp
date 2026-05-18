@@ -30,6 +30,11 @@ async function conectar() {
       value      TEXT NOT NULL,
       updated_at INTEGER DEFAULT (unixepoch())
     );
+
+    CREATE TABLE IF NOT EXISTS chat_seguimiento (
+      chat_nombre_key TEXT PRIMARY KEY,
+      ultimo_procesado INTEGER DEFAULT 0
+    );
   `);
 
   // Crear índice único para deduplicación. Si ya hay duplicados de antes
@@ -103,6 +108,76 @@ async function marcarProcesados(ids) {
     });
   } catch (err) {
     console.error(`[DB] Error al marcar mensajes como procesados:`, err.message);
+  }
+}
+
+/**
+ * Devuelve chats distintos con mensajes en los últimos `dias` días,
+ * ordenados por cantidad DESC. Array de { chat_id, chat_nombre, cantidad }.
+ */
+async function obtenerChatsDistintos(dias = 30) {
+  try {
+    const desde = Math.floor(Date.now() / 1000) - dias * 86400;
+    const result = await db.execute({
+      sql: `SELECT chat_id, chat_nombre, COUNT(*) as cantidad
+            FROM mensajes
+            WHERE timestamp >= ?
+            GROUP BY chat_id, chat_nombre
+            ORDER BY cantidad DESC`,
+      args: [desde],
+    });
+    return result.rows;
+  } catch (err) {
+    console.error(`[DB] Error al obtener chats distintos:`, err.message);
+    return [];
+  }
+}
+
+/**
+ * Devuelve mensajes sin procesar de un chat específico, ordenados por timestamp ASC.
+ */
+async function obtenerMensajesChatSinProcesar(chatId) {
+  try {
+    const result = await db.execute({
+      sql: `SELECT * FROM mensajes WHERE procesado = 0 AND chat_id = ? ORDER BY timestamp ASC`,
+      args: [chatId],
+    });
+    return result.rows;
+  } catch (err) {
+    console.error(`[DB] Error al leer mensajes sin procesar de ${chatId}:`, err.message);
+    return [];
+  }
+}
+
+/**
+ * Lee el ultimo_procesado de chat_seguimiento para la clave dada.
+ * Devuelve el integer o 0 si no existe.
+ */
+async function obtenerUltimoProcesado(chatNombreKey) {
+  try {
+    const result = await db.execute({
+      sql: `SELECT ultimo_procesado FROM chat_seguimiento WHERE chat_nombre_key = ?`,
+      args: [chatNombreKey],
+    });
+    if (!result.rows[0]) return 0;
+    return result.rows[0].ultimo_procesado || 0;
+  } catch (err) {
+    console.error(`[DB] Error al obtener ultimo_procesado de "${chatNombreKey}":`, err.message);
+    return 0;
+  }
+}
+
+/**
+ * Actualiza (o inserta) el ultimo_procesado para la clave dada con el timestamp actual.
+ */
+async function actualizarUltimoProcesado(chatNombreKey) {
+  try {
+    await db.execute({
+      sql: `INSERT OR REPLACE INTO chat_seguimiento (chat_nombre_key, ultimo_procesado) VALUES (?, unixepoch())`,
+      args: [chatNombreKey],
+    });
+  } catch (err) {
+    console.error(`[DB] Error al actualizar ultimo_procesado de "${chatNombreKey}":`, err.message);
   }
 }
 
@@ -183,4 +258,8 @@ module.exports = {
   marcarProcesados,
   useTursoAuthState,
   limpiarAuth,
+  obtenerChatsDistintos,
+  obtenerMensajesChatSinProcesar,
+  obtenerUltimoProcesado,
+  actualizarUltimoProcesado,
 };

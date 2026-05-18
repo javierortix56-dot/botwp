@@ -1,7 +1,8 @@
 const config = require('./config.json');
 
 const vips = new Set(config.vips.map((n) => n.replace(/\D/g, '')));
-const grupos = config.grupos.map((g) => g.toLowerCase().trim());
+// Soportar grupos como strings (legacy) o como objetos { nombre, frecuencia_horas }
+const gruposNombres = config.grupos.map((g) => (typeof g === 'string' ? g : g.nombre).toLowerCase().trim());
 const keywords = config.keywords.map((k) => k.toLowerCase().trim());
 
 function esVip(remitenteId) {
@@ -11,7 +12,7 @@ function esVip(remitenteId) {
 
 function esGrupoMonitoreado(chatNombre) {
   const nombre = (chatNombre || '').toLowerCase().trim();
-  return grupos.some((g) => nombre.includes(g));
+  return gruposNombres.some((g) => nombre.includes(g));
 }
 
 function tieneKeyword(cuerpo) {
@@ -43,4 +44,31 @@ function obtenerFlags(msg) {
   };
 }
 
-module.exports = { debeAnalizarse, obtenerFlags, esVip, esGrupoMonitoreado, tieneKeyword, esIndividual };
+/**
+ * Devuelve los frecuencia_horas del grupo que hace match (case-insensitive, substring),
+ * o null si el chat no está configurado.
+ */
+function obtenerFrecuenciaGrupo(chatNombre) {
+  const nombre = (chatNombre || '').toLowerCase().trim();
+  const grupoConfig = config.grupos.find((g) => {
+    const gNombre = (typeof g === 'string' ? g : g.nombre).toLowerCase().trim();
+    return nombre.includes(gNombre);
+  });
+  if (!grupoConfig) return null;
+  if (typeof grupoConfig === 'string') return null; // legacy sin frecuencia
+  return grupoConfig.frecuencia_horas ?? null;
+}
+
+/**
+ * Devuelve el objeto config completo del grupo que hace match, o null si no está.
+ */
+function obtenerConfigGrupo(chatNombre) {
+  const nombre = (chatNombre || '').toLowerCase().trim();
+  const grupoConfig = config.grupos.find((g) => {
+    const gNombre = (typeof g === 'string' ? g : g.nombre).toLowerCase().trim();
+    return nombre.includes(gNombre);
+  });
+  return grupoConfig || null;
+}
+
+module.exports = { debeAnalizarse, obtenerFlags, esVip, esGrupoMonitoreado, tieneKeyword, esIndividual, obtenerFrecuenciaGrupo, obtenerConfigGrupo };
