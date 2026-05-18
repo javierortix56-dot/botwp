@@ -10,16 +10,41 @@ if (missing.length) {
 }
 
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const cron = require('node-cron');
 const QRCode = require('qrcode');
-const { conectar, obtenerMensajesSinProcesar, obtenerMensajesDesde, marcarProcesados, guardarMensaje, limpiarAuth } = require('./db');
+const {
+  conectar,
+  obtenerMensajesSinProcesar,
+  obtenerMensajesDesde,
+  marcarProcesados,
+  guardarMensaje,
+  limpiarAuth,
+  obtenerChatsDistintos,
+  obtenerMensajesChatSinProcesar,
+  obtenerUltimoProcesado,
+  actualizarUltimoProcesado,
+} = require('./db');
 const { iniciarCliente, enviarResumen, enviarTextoLibre } = require('./whatsapp');
-const { analizarMensajes, analizarIndividuales } = require('./gemini');
-const config = require('./config.json');
+const { analizarMensajes, analizarChat, analizarIndividuales } = require('./gemini');
+const { obtenerFrecuenciaGrupo, obtenerConfigGrupo } = require('./filtros');
+
+let config = require('./config.json');
 
 const https = require('https');
 
 const PORT = process.env.PORT || 3000;
+
+function recargarConfig() {
+  try {
+    delete require.cache[require.resolve('./config.json')];
+    config = require('./config.json');
+    console.log(`[Config] Recargada`);
+  } catch (err) {
+    console.error(`[Config] Error recargando:`, err.message);
+  }
+}
 
 function postNtfy(title, body) {
   if (!process.env.NTFY_TOPIC) return;
@@ -105,9 +130,177 @@ function notificarCalendario(eventos, compromisos, pedidos) {
   postNtfy(`Resumen diario - ${total} items`, lineas.join('\n'));
 }
 
+/**
+ * Formatea el resumen de un chat con sus temas para enviar por WA.
+ * Ordena: primero me_piden:true, luego por tipo (accion → pago → evento → info).
+ */
+function formatearResumenChat(chatNombre, temas) {
+  if (!temas.length) return '';
+
+  const ORDEN_TIPO = { accion: 0, pago: 1, evento: 2, info: 3 };
+  const EMOJI_TIPO = { accion: '🔴', pago: '💰', evento: '📅', info: 'ℹ️' };
+
+  // Separar los que me piden directamente
+  const mePiden = temas.filter((t) => t.me_piden);
+  const resto = temas.filter((t) => !t.me_piden);
+
+  // Ordenar el resto por tipo
+  resto.sort((a, b) => (ORDEN_TIPO[a.tipo] ?? 3) - (ORDEN_TIPO[b.tipo] ?? 3));
+
+  // Ordenados: primero me_piden, luego resto
+  const ordenados = [...mePiden, ...resto];
+
+  const lineas = [`📋 *${chatNombre}*\n`];
+
+  // Sección especial "Te piden directamente" al inicio si hay me_piden
+  if (mePiden.length) {
+    lineas.push('📬 *Te piden directamente:*');
+    mePiden.forEach((t) => {
+      lineas.push(`  • ${t.de}: ${t.accion || t.resumen}`);
+    });
+    lineas.push('');
+  }
+
+  // Todos los temas ordenados con su emoji y detalle
+  ordenados.forEach((t) => {
+    const emoji = EMOJI_TIPO[t.tipo] || '•';
+    lineas.push(`${emoji} *De: ${t.de}* — ${t.tema}`);
+    lineas.push(`  ${t.resumen}`);
+    if (t.accion) lineas.push(`  _→ ${t.accion}_`);
+  });
+
+  return lineas.join('\n').trim();
+}
+
 let estadoWA = 'arrancando';
 let qrActual = null;
 let tsAutenticando = null;
+
+function leerBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk.toString(); });
+    req.on('end', () => resolve(new URLSearchParams(body)));
+    req.on('error', reject);
+  });
+}
+
+function generarPaginaConfiguracion(chatsDB, configActual, mensaje) {
+  const gruposConfigurados = new Map();
+  (configActual.grupos || []).forEach((g) => {
+    const nombre = typeof g === 'string' ? g : g.nombre;
+    const frecuencia = typeof g === 'string' ? 0 : (g.frecuencia_horas || 0);
+    gruposConfigurados.set(nombre.toLowerCase().trim(), { nombre, frecuencia });
+  });
+
+  // Unir chats de DB con los ya configurados
+  const chatKeys = new Set();
+  const chats = [];
+
+  for (const row of chatsDB) {
+    const key = (row.chat_nombre || row.chat_id || '').toLowerCase().trim();
+    if (!key || chatKeys.has(key)) continue;
+    chatKeys.add(key);
+    const conf = gruposConfigurados.get(key);
+    chats.push({
+      chat_id: row.chat_id,
+      chat_nombre: row.chat_nombre || row.chat_id,
+      cantidad: row.cantidad || 0,
+      frecuencia: conf ? conf.frecuencia : 0,
+    });
+  }
+
+  // Agregar chats configurados que no tienen mensajes recientes
+  for (const [key, conf] of gruposConfigurados) {
+    if (!chatKeys.has(key)) {
+      chats.push({
+        chat_id: null,
+        chat_nombre: conf.nombre,
+        cantidad: 0,
+        frecuencia: conf.frecuencia,
+      });
+    }
+  }
+
+  const opcionesFrecuencia = [
+    { valor: 0, label: 'Desactivado' },
+    { valor: 1, label: 'Cada hora' },
+    { valor: 8, label: 'Cada 8 horas' },
+    { valor: 12, label: 'Dos veces al día' },
+    { valor: 24, label: 'Diario' },
+  ];
+
+  function selectFrecuencia(chatNombre, frecuenciaActual) {
+    const key = encodeURIComponent(chatNombre);
+    const opts = opcionesFrecuencia.map((o) => {
+      const sel = o.valor === frecuenciaActual ? ' selected' : '';
+      return `<option value="${o.valor}"${sel}>${o.label}</option>`;
+    }).join('');
+    return `<select name="freq_${key}" style="padding:4px 8px;border-radius:4px;border:1px solid #ccc">${opts}</select>`;
+  }
+
+  const filas = chats.map((c) => {
+    const esGrupo = c.chat_id ? c.chat_id.endsWith('@g.us') : true;
+    const tipoTag = esGrupo ? '<span style="font-size:.75rem;background:#e8f4fd;color:#1a73e8;padding:2px 6px;border-radius:10px;margin-left:6px">Grupo</span>' : '<span style="font-size:.75rem;background:#f0fdf4;color:#16a34a;padding:2px 6px;border-radius:10px;margin-left:6px">Individual</span>';
+    return `<tr>
+      <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${c.chat_nombre}${tipoTag}</td>
+      <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0;text-align:center;color:#888">${c.cantidad}</td>
+      <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${selectFrecuencia(c.chat_nombre, c.frecuencia)}</td>
+    </tr>`;
+  }).join('');
+
+  const mensajeHtml = mensaje
+    ? `<div style="background:#d4edda;border:1px solid #c3e6cb;color:#155724;padding:12px 16px;border-radius:6px;margin-bottom:20px">${mensaje}</div>`
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Configurar chats monitoreados</title>
+  <style>
+    body { font-family: sans-serif; background: #f0f2f5; margin: 0; padding: 24px 16px; color: #111; }
+    .card { background: #fff; border-radius: 12px; max-width: 700px; margin: 0 auto; padding: 32px 24px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+    h2 { margin: 0 0 8px; font-size: 1.4rem; }
+    .subtitle { color: #888; font-size: .9rem; margin-bottom: 24px; }
+    label { font-weight: 600; display: block; margin-bottom: 6px; }
+    input[type=text] { width: 100%; box-sizing: border-box; padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; margin-bottom: 20px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th { text-align: left; padding: 10px 12px; background: #f8f9fa; font-size: .85rem; color: #555; border-bottom: 2px solid #e0e0e0; }
+    .btn { display: inline-block; padding: 10px 28px; background: #075e54; color: #fff; border: none; border-radius: 6px; font-size: 1rem; cursor: pointer; margin-top: 20px; }
+    .btn:hover { background: #064c44; }
+    .back { display: inline-block; margin-bottom: 20px; color: #075e54; text-decoration: none; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <a href="/" class="back">← Volver al inicio</a>
+    <h2>⚙️ Configurar chats monitoreados</h2>
+    <p class="subtitle">Elegí con qué frecuencia querés recibir resúmenes de cada chat.</p>
+    ${mensajeHtml}
+    <form method="POST" action="/configurar">
+      <label for="nombre_dueno">Tu nombre (opcional — para personalizar los resúmenes)</label>
+      <input type="text" id="nombre_dueno" name="nombre_dueno" value="${(configActual.nombre_dueno || '').replace(/"/g, '&quot;')}" placeholder="Ej: Martín">
+      <label>Chats con mensajes recientes (últimos 30 días)</label>
+      <table>
+        <thead>
+          <tr>
+            <th>Chat</th>
+            <th style="text-align:center">Mensajes</th>
+            <th>Frecuencia</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${filas || '<tr><td colspan="3" style="padding:20px;text-align:center;color:#888">No hay mensajes recientes en la base de datos.</td></tr>'}
+        </tbody>
+      </table>
+      <button type="submit" class="btn">💾 Guardar configuración</button>
+    </form>
+  </div>
+</body>
+</html>`;
+}
 
 function iniciarServidor() {
   const server = http.createServer(async (req, res) => {
@@ -177,8 +370,60 @@ function iniciarServidor() {
       return;
     }
 
+    // GET /configurar — página de configuración de chats
+    if (req.url === '/configurar' && req.method === 'GET') {
+      try {
+        const params = new URL(req.url, `http://localhost`).searchParams;
+        const mensaje = params.get('ok') ? '✅ Configuración guardada correctamente.' : '';
+        const chatsDB = await obtenerChatsDistintos(30);
+        const html = generarPaginaConfiguracion(chatsDB, config, mensaje);
+        res.end(html);
+      } catch (err) {
+        console.error(`[Config] Error generando página:`, err.message);
+        res.end(`<p>Error: ${err.message}</p>`);
+      }
+      return;
+    }
+
+    // POST /configurar — guardar configuración
+    if (req.url === '/configurar' && req.method === 'POST') {
+      try {
+        const params = await leerBody(req);
+        const nombreDueno = (params.get('nombre_dueno') || '').trim();
+
+        // Reconstruir array de grupos a partir de los campos freq_CHATKEY
+        const nuevosGrupos = [];
+        for (const [key, value] of params.entries()) {
+          if (!key.startsWith('freq_')) continue;
+          const frecuencia = parseInt(value, 10);
+          if (isNaN(frecuencia) || frecuencia <= 0) continue; // Desactivado o inválido
+          const chatNombre = decodeURIComponent(key.slice(5)); // quitar prefijo "freq_"
+          nuevosGrupos.push({ nombre: chatNombre, frecuencia_horas: frecuencia });
+        }
+
+        // Leer config actual y actualizarla
+        const configPath = path.join(__dirname, 'config.json');
+        const configActual = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        configActual.nombre_dueno = nombreDueno;
+        configActual.grupos = nuevosGrupos;
+
+        fs.writeFileSync(configPath, JSON.stringify(configActual, null, 2), 'utf8');
+        recargarConfig();
+
+        console.log(`[Config] Guardada — nombre_dueno="${nombreDueno}", ${nuevosGrupos.length} grupos`);
+
+        res.setHeader('Location', '/configurar?ok=1');
+        res.writeHead(302);
+        res.end();
+      } catch (err) {
+        console.error(`[Config] Error guardando:`, err.message);
+        res.end(`<p>Error guardando configuraci&#243;n: ${err.message}</p>`);
+      }
+      return;
+    }
+
     if (estadoWA === 'conectado') {
-      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>&#9989; WhatsApp conectado</h2><p>El bot est&#225; activo y escuchando mensajes.</p><h3 style="margin-top:32px;color:#555">Res&#250;menes por per&#237;odo</h3><p style="color:#888;font-size:.85rem;margin:0 0 12px">Analiza todos los mensajes (le&#237;dos y no le&#237;dos) del per&#237;odo elegido</p><p><a href="/resumen?h=24" style="display:inline-block;margin:6px;padding:10px 24px;background:#27ae60;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 24 horas</a></p><p><a href="/resumen?h=72" style="display:inline-block;margin:6px;padding:10px 24px;background:#16a085;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 72 horas</a></p><p><a href="/resumen?h=168" style="display:inline-block;margin:6px;padding:10px 24px;background:#117a65;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltima semana</a></p><h3 style="margin-top:32px;color:#555">Mantenimiento</h3><p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p><p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Procesar mensajes nuevos (cron manual)</a></p><p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Revisar historial completo</a></p><p style="margin-top:24px"><a href="/limpiar-sesion" style="display:inline-block;margin:6px;padding:8px 20px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem" onclick="return confirm('Borrar sesi&#243;n?')">Limpiar sesi&#243;n y re-sincronizar</a></p></body></html>`);
+      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>&#9989; WhatsApp conectado</h2><p>El bot est&#225; activo y escuchando mensajes.</p><h3 style="margin-top:32px;color:#555">Res&#250;menes por per&#237;odo</h3><p style="color:#888;font-size:.85rem;margin:0 0 12px">Analiza todos los mensajes (le&#237;dos y no le&#237;dos) del per&#237;odo elegido</p><p><a href="/resumen?h=24" style="display:inline-block;margin:6px;padding:10px 24px;background:#27ae60;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 24 horas</a></p><p><a href="/resumen?h=72" style="display:inline-block;margin:6px;padding:10px 24px;background:#16a085;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 72 horas</a></p><p><a href="/resumen?h=168" style="display:inline-block;margin:6px;padding:10px 24px;background:#117a65;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltima semana</a></p><h3 style="margin-top:32px;color:#555">Configuraci&#243;n</h3><p><a href="/configurar" style="display:inline-block;margin:6px;padding:10px 24px;background:#6c3483;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#9881;&#65039; Configurar chats</a></p><h3 style="margin-top:32px;color:#555">Mantenimiento</h3><p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p><p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Procesar mensajes nuevos (cron manual)</a></p><p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Revisar historial completo</a></p><p style="margin-top:24px"><a href="/limpiar-sesion" style="display:inline-block;margin:6px;padding:8px 20px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem" onclick="return confirm('Borrar sesi&#243;n?')">Limpiar sesi&#243;n y re-sincronizar</a></p></body></html>`);
       return;
     }
 
@@ -234,66 +479,68 @@ async function resumenPeriodo(horas) {
   const individuales = todos.filter((m) => !m.chat_id?.endsWith('@g.us'));
   console.log(`[Resumen ${labelHoras}] ${todos.length} mensajes — ${grupales.length} grupales, ${individuales.length} individuales`);
 
-  const [resGrupos, resIndiv] = await Promise.all([
-    grupales.length ? analizarMensajes(grupales) : Promise.resolve({ temas: [] }),
-    individuales.length ? analizarIndividuales(individuales) : Promise.resolve({ eventos: [], compromisos: [], pedidos: [] }),
-  ]);
+  // Agrupar mensajes grupales por chat_id y analizar cada chat por separado
+  const porChat = new Map();
+  for (const m of grupales) {
+    const chatId = m.chat_id;
+    if (!porChat.has(chatId)) porChat.set(chatId, []);
+    porChat.get(chatId).push(m);
+  }
 
-  const texto = formatearResumenPeriodo(labelHoras, resGrupos.temas, resIndiv.eventos, resIndiv.compromisos, resIndiv.pedidos, { totalMensajes: todos.length, grupales: grupales.length, individuales: individuales.length });
-  try { await enviarTextoLibre(texto); console.log(`[Resumen ${labelHoras}] Enviado a WhatsApp`); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message); }
-  postNtfy(`Resumen ${labelHoras}`, texto.replace(/\*/g, '').replace(/_/g, ''));
+  const resumenesChats = []; // { chatNombre, temas }
+  for (const [chatId, mensajesChat] of porChat) {
+    const chatNombre = mensajesChat[0].chat_nombre || chatId;
+    console.log(`[Resumen ${labelHoras}] Analizando "${chatNombre}" (${mensajesChat.length} mensajes)`);
+    try {
+      const { temas } = await analizarChat(chatNombre, mensajesChat);
+      if (temas.length) {
+        resumenesChats.push({ chatNombre, temas });
+      }
+    } catch (err) {
+      console.error(`[Resumen ${labelHoras}] Error analizando "${chatNombre}":`, err.message);
+    }
+  }
+
+  // Analizar individuales
+  let resIndiv = { eventos: [], compromisos: [], pedidos: [] };
+  if (individuales.length) {
+    try {
+      resIndiv = await analizarIndividuales(individuales);
+    } catch (err) {
+      console.error(`[Resumen ${labelHoras}] Error analizando individuales:`, err.message);
+    }
+  }
+
+  // Enviar un mensaje por chat grupal (si tiene temas)
+  const header = `📋 *Resumen últimas ${labelHoras}*\n_${todos.length} mensajes — ${grupales.length} grupales, ${individuales.length} individuales_\n`;
+  try { await enviarTextoLibre(header); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando header:`, err.message); }
+
+  for (const { chatNombre, temas } of resumenesChats) {
+    const texto = formatearResumenChat(chatNombre, temas);
+    if (texto) {
+      try { await enviarTextoLibre(texto); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando resumen de "${chatNombre}":`, err.message); }
+    }
+  }
+
+  // Enviar resumen de individuales si hay algo
+  if (resIndiv.eventos.length || resIndiv.compromisos.length || resIndiv.pedidos.length) {
+    const textoIndiv = formatearResumenIndividuales(resIndiv.eventos, resIndiv.compromisos, resIndiv.pedidos);
+    try { await enviarTextoLibre(textoIndiv); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando individuales:`, err.message); }
+  }
+
+  if (!resumenesChats.length && !resIndiv.eventos.length && !resIndiv.compromisos.length && !resIndiv.pedidos.length) {
+    try { await enviarTextoLibre('_Sin temas relevantes en este período._'); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando sin-temas:`, err.message); }
+  }
+
+  const totalTemas = resumenesChats.reduce((acc, r) => acc + r.temas.length, 0);
+  console.log(`[Resumen ${labelHoras}] Enviado — ${resumenesChats.length} chats con temas, ${totalTemas} temas totales`);
+  postNtfy(`Resumen ${labelHoras}`, `${resumenesChats.length} chats con temas, ${totalTemas} temas`);
 }
 
-function formatearResumenPeriodo(label, temas, eventos, compromisos, pedidos, stats) {
-  const lineas = [`📋 *Resumen últimas ${label}*`, `_${stats.totalMensajes} mensajes — ${stats.grupales} grupales, ${stats.individuales} individuales_`, ''];
-
-  if (temas.length) {
-    const orden = { accion: 0, pago: 1, evento: 2, info: 3 };
-    const emoji = { accion: '🔴', pago: '💰', evento: '📅', info: 'ℹ️' };
-    const ordenados = [...temas].sort((a, b) => (orden[a.tipo] ?? 3) - (orden[b.tipo] ?? 3));
-    lineas.push('👥 *GRUPOS*');
-    ordenados.forEach((t) => {
-      lineas.push(`${emoji[t.tipo] || '•'} *${t.tema}* — ${t.chat}`);
-      lineas.push(`  ${t.resumen}`);
-      if (t.accion) lineas.push(`  _→ ${t.accion}_`);
-    });
-    lineas.push('');
-  }
-
-  if (eventos.length) {
-    lineas.push('📅 *EVENTOS*');
-    eventos.forEach((e) => {
-      lineas.push(`• ${e.fecha} — ${e.titulo} (${e.chat})`);
-      if (e.detalle) lineas.push(`  ${e.detalle}`);
-    });
-    lineas.push('');
-  }
-
-  if (pedidos.length) {
-    lineas.push('📬 *TE PIDEN*');
-    pedidos.forEach((p) => {
-      lineas.push(`• *${p.de}*: ${p.pedido}`);
-      if (p.contexto) lineas.push(`  ${p.contexto}`);
-    });
-    lineas.push('');
-  }
-
-  if (compromisos.length) {
-    lineas.push('✅ *TUS PENDIENTES*');
-    compromisos.forEach((c) => {
-      lineas.push(`• *${c.tema}* (${c.chat})`);
-      lineas.push(`  ${c.resumen}`);
-    });
-    lineas.push('');
-  }
-
-  if (!temas.length && !eventos.length && !compromisos.length && !pedidos.length) {
-    lineas.push('_Sin temas relevantes en este período._');
-  }
-
-  return lineas.join('\n').trim();
-}
-
+/**
+ * Cron grupos: corre cada 30 minutos.
+ * Para cada chat grupal sin procesar, verifica si corresponde procesarlo según su frecuencia_horas.
+ */
 async function procesarMensajesGrupos() {
   const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
   console.log(`\n[Cron grupos] Iniciando — ${hora}`);
@@ -302,14 +549,61 @@ async function procesarMensajesGrupos() {
     const grupales = todos.filter((m) => m.chat_id?.endsWith('@g.us'));
     console.log(`[Cron grupos] ${grupales.length} mensajes grupales sin procesar`);
     if (!grupales.length) { console.log(`[Cron grupos] Nada que analizar`); return; }
-    const { temas, idsProcesados } = await analizarMensajes(grupales);
-    await enviarResumen(grupales, temas);
-    notificarNtfy(temas);
-    await marcarProcesados(idsProcesados);
-    const fallidos = grupales.length - idsProcesados.length;
-    console.log(`[Cron grupos] Completo — ${temas.length} temas, ${idsProcesados.length} mensajes procesados${fallidos > 0 ? `, ${fallidos} quedaron pendientes para el próximo ciclo` : ''}`);
+
+    // Agrupar por chat_id
+    const porChat = new Map();
+    for (const m of grupales) {
+      const chatId = m.chat_id;
+      if (!porChat.has(chatId)) porChat.set(chatId, []);
+      porChat.get(chatId).push(m);
+    }
+
+    const ahora = Math.floor(Date.now() / 1000);
+
+    for (const [chatId, mensajesChat] of porChat) {
+      const chatNombre = mensajesChat[0].chat_nombre || chatId;
+      const frecuencia = obtenerFrecuenciaGrupo(chatNombre);
+
+      if (frecuencia === null) {
+        console.log(`[Cron grupos] "${chatNombre}" — no configurado, skip`);
+        continue;
+      }
+
+      const chatNombreKey = chatNombre.toLowerCase().trim();
+      const ultimoProcesado = await obtenerUltimoProcesado(chatNombreKey);
+      const segundosTranscurridos = ahora - ultimoProcesado;
+      const segundosFrecuencia = frecuencia * 3600;
+
+      if (segundosTranscurridos < segundosFrecuencia) {
+        const minutosRestantes = Math.round((segundosFrecuencia - segundosTranscurridos) / 60);
+        console.log(`[Cron grupos] "${chatNombre}" — faltan ${minutosRestantes} min para próximo proceso, skip`);
+        continue;
+      }
+
+      console.log(`[Cron grupos] Procesando "${chatNombre}" (${mensajesChat.length} mensajes, frecuencia ${frecuencia}h)`);
+      try {
+        const { temas, idsProcesados } = await analizarChat(chatNombre, mensajesChat);
+
+        if (temas.length) {
+          const texto = formatearResumenChat(chatNombre, temas);
+          try { await enviarTextoLibre(texto); } catch (err) { console.error(`[Cron grupos] Error enviando WA para "${chatNombre}":`, err.message); }
+          notificarNtfy(temas);
+        } else {
+          console.log(`[Cron grupos] "${chatNombre}" — sin temas relevantes`);
+        }
+
+        await marcarProcesados(idsProcesados);
+        await actualizarUltimoProcesado(chatNombreKey);
+
+        console.log(`[Cron grupos] "${chatNombre}" OK — ${temas.length} temas, ${idsProcesados.length} mensajes procesados`);
+      } catch (err) {
+        console.error(`[Cron grupos] Error procesando "${chatNombre}":`, err.message);
+      }
+    }
+
+    console.log(`[Cron grupos] Ciclo completo`);
   } catch (err) {
-    console.error(`[Cron grupos] Error:`, err.message);
+    console.error(`[Cron grupos] Error general:`, err.message);
   }
 }
 
@@ -365,9 +659,15 @@ async function main() {
     estadoWA = 'error_wa';
     return;
   }
-  cron.schedule(config.resumen.hora_cron_grupos, procesarMensajesGrupos, { timezone: 'America/Argentina/Buenos_Aires' });
-  cron.schedule(config.resumen.hora_cron_individuales, procesarMensajesIndividuales, { timezone: 'America/Argentina/Buenos_Aires' });
-  console.log(`[Bot] Crones activos — grupos "${config.resumen.hora_cron_grupos}", individuales "${config.resumen.hora_cron_individuales}"`);
+
+  // Cron grupos: cada 30 minutos — verifica por frecuencia de cada chat
+  cron.schedule('0,30 * * * *', procesarMensajesGrupos, { timezone: 'America/Argentina/Buenos_Aires' });
+
+  // Cron individuales: según config o default 22:00
+  const cronIndividuales = config.resumen?.hora_cron_individuales || '0 22 * * *';
+  cron.schedule(cronIndividuales, procesarMensajesIndividuales, { timezone: 'America/Argentina/Buenos_Aires' });
+
+  console.log(`[Bot] Crones activos — grupos "0,30 * * * *" (cada 30 min), individuales "${cronIndividuales}"`);
 }
 
 main();
