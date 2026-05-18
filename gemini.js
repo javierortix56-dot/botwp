@@ -5,35 +5,36 @@ require('dotenv').config();
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
 
-const BATCH_SIZE = config.resumen.max_mensajes_por_batch;
+const BATCH_SIZE = config.max_mensajes_por_batch || config.resumen?.max_mensajes_por_batch || 5;
 
-const PROMPT_GRUPOS = `Sos un asistente que analiza grupos de WhatsApp y le reporta al dueño del teléfono qué necesita saber o hacer.
+/**
+ * Construye el bloque de contexto del dueño para insertar en el prompt de grupos.
+ */
+function buildContextoDueno() {
+  const nombre = (config.nombre_dueno || '').trim();
+  if (!nombre) return '';
+  return `\nEl dueño del teléfono se llama ${nombre}. "me_piden" = true cuando alguien le habla directamente a ${nombre} o le pide algo personal.`;
+}
 
-Se te dan mensajes de distintos grupos. Tu trabajo es identificar temas relevantes y determinar con precisión qué implica cada uno para el dueño.
+const PROMPT_GRUPOS_BASE = `Analizás mensajes de UN grupo de WhatsApp para reportarle al dueño del teléfono qué necesita saber o hacer.
+[CONTEXTO_DUENO]
 
-CLASIFICACIÓN DE TEMAS:
+CLASIFICÁ cada tema relevante:
 - "accion": el dueño debe responder, confirmar, firmar, traer algo, decidir, autorizar, etc.
-- "pago": hay que pagar algo — cuota, excursión, materiales, servicio, etc.
-- "evento": algo que ocurre en una fecha específica — acto, reunión, excursión, partido, etc.
-- "info": información útil pero sin acción requerida del dueño
+- "pago": hay que pagar algo — cuota, actividad, servicio (incluí monto y fecha si se menciona)
+- "evento": algo en fecha específica — acto, reunión, excursión, partido (incluí fecha y hora)
+- "info": información útil pero sin acción requerida
+- "spam": cadenas virales, publicidad, memes, reenvíos sin contenido propio → OMITIR del resultado
 
-PARA GRUPOS ESCOLARES prestá especial atención a:
-- Autorizaciones para firmar o devolver (indicá el plazo si lo hay)
-- Pagos: cuotas, actividades, materiales, viajes (incluí monto y fecha límite si se mencionan)
-- Eventos: actos patrios, obras de teatro, excursiones, competencias, jornadas especiales
-- Comunicados de docentes o dirección con instrucciones para los padres
-- Cosas que los chicos deben llevar o traer
+IGNORAR completamente: saludos, stickers, GIFs, audios de cortesía, comentarios de relleno
 
-REGLAS:
-- Ignorá completamente: saludos, GIFs, stickers, audios de cortesía, chistes, spam, comentarios sin contenido
-- Una oración precisa por tema, sin vaguedades — si hay fecha, monto o destinatario específico, incluílos
-- El campo "accion" debe decir exactamente qué tiene que hacer el dueño (o null si es solo info)
-- No agrupés temas distintos — mejor dos entradas separadas que una entrada confusa
+DETECTAR "me_piden": true cuando alguien le está pidiendo ALGO ESPECÍFICO al dueño del teléfono (responder, confirmar, enviar, decidir algo). false cuando es información general o una pregunta al grupo.
 
-Respondé SOLO con un array JSON válido, sin texto extra antes ni después:
-[{"tema": "<2-4 palabras>", "resumen": "<qué pasa, con datos concretos>", "chat": "<nombre del grupo>", "ids": [<id>, ...], "tipo": "<accion|pago|evento|info>", "accion": "<qué debe hacer el dueño exactamente, o null>"}]
+Para grupos escolares prestá atención a: autorizaciones para firmar, pagos con fecha límite, actos/excursiones, comunicados de docentes.
 
-Si todos los mensajes son irrelevantes (saludos, spam, etc.), devolvé: []`;
+Respondé SOLO con JSON válido, sin texto extra:
+[{"tema":"<2-4 palabras>","resumen":"<qué pasa con datos concretos>","tipo":"<accion|pago|evento|info>","de":"<nombre del remitente>","me_piden":false,"accion":"<qué debe hacer el dueño exactamente, o null>","ids":[<id>,…]}]
+Si todo es spam/saludos/irrelevante: []`;
 
 const PROMPT_INDIVIDUALES = `Sos un asistente que analiza chats individuales de WhatsApp para su dueño y le reporta qué tiene pendiente.
 
@@ -79,12 +80,36 @@ async function callGemini(prompt, intento = 1) {
   }
 }
 
+/**
+ * Arma el prompt de grupos reemplazando el placeholder de contexto del dueño.
+ */
+function buildPromptGrupos(chatNombre) {
+  const contextoDueno = buildContextoDueno();
+  const base = PROMPT_GRUPOS_BASE.replace('[CONTEXTO_DUENO]', contextoDueno);
+  if (chatNombre) {
+    return `${base}\n\nGrupo: ${chatNombre}`;
+  }
+  return base;
+}
+
+async function resumirBatchChat(mensajes, promptGrupos) {
+  const lista = mensajes
+    .map((m) => `ID ${m.id} | De: ${m.remitente ?? m.remitente_id}\nMensaje: ${m.cuerpo}`)
+    .join('\n---\n');
+
+  const texto = await callGemini(`${promptGrupos}\n\nMensajes:\n${lista}`);
+  const match = texto.match(/\[[\s\S]*\]/);
+  if (!match) throw new Error(`Respuesta inesperada: ${texto.slice(0, 200)}`);
+  return JSON.parse(match[0]);
+}
+
 async function resumirBatchGrupos(mensajes) {
   const lista = mensajes
     .map((m) => `ID ${m.id} | De: ${m.remitente ?? m.remitente_id} | Chat: ${m.chat_nombre ?? m.chat_id}\nMensaje: ${m.cuerpo}`)
     .join('\n---\n');
 
-  const texto = await callGemini(`${PROMPT_GRUPOS}\n\nMensajes:\n${lista}`);
+  const promptGrupos = buildPromptGrupos(null);
+  const texto = await callGemini(`${promptGrupos}\n\nMensajes:\n${lista}`);
   const match = texto.match(/\[[\s\S]*\]/);
   if (!match) throw new Error(`Respuesta inesperada: ${texto.slice(0, 200)}`);
   return JSON.parse(match[0]);
@@ -101,25 +126,67 @@ async function resumirBatchIndividuales(mensajes, hoy) {
   return JSON.parse(match[0]);
 }
 
-async function analizarMensajes(mensajes) {
+/**
+ * Analiza mensajes de UN solo chat en batches.
+ * Devuelve { temas: [...], idsProcesados: [...] }
+ */
+async function analizarChat(chatNombre, mensajes) {
   if (!mensajes.length) return { temas: [], idsProcesados: [] };
   const temas = [];
   const idsProcesados = [];
+  const promptGrupos = buildPromptGrupos(chatNombre);
 
   for (let i = 0; i < mensajes.length; i += BATCH_SIZE) {
     const batch = mensajes.slice(i, i + BATCH_SIZE);
     const numBatch = Math.floor(i / BATCH_SIZE) + 1;
     const totalBatches = Math.ceil(mensajes.length / BATCH_SIZE);
 
-    console.log(`[Gemini] Resumiendo batch ${numBatch}/${totalBatches} (${batch.length} mensajes)`);
+    console.log(`[Gemini] Chat "${chatNombre}" — batch ${numBatch}/${totalBatches} (${batch.length} mensajes)`);
 
     try {
-      const resultado = await resumirBatchGrupos(batch);
+      const resultado = await resumirBatchChat(batch, promptGrupos);
       temas.push(...resultado);
       idsProcesados.push(...batch.map((m) => m.id));
       console.log(`[Gemini] Batch ${numBatch} OK — ${resultado.length} temas`);
     } catch (err) {
-      console.error(`[Gemini] Error en batch ${numBatch}:`, err.message);
+      console.error(`[Gemini] Error en batch ${numBatch} de "${chatNombre}":`, err.message);
+    }
+  }
+
+  return { temas, idsProcesados };
+}
+
+/**
+ * Analiza un array de mensajes grupales (de distintos chats).
+ * Agrupa por chat_id y llama analizarChat para cada uno.
+ * Devuelve { temas: [...], idsProcesados: [...] } consolidado.
+ * Mantiene compatibilidad con el uso anterior.
+ */
+async function analizarMensajes(mensajes) {
+  if (!mensajes.length) return { temas: [], idsProcesados: [] };
+
+  // Agrupar por chat_id
+  const porChat = new Map();
+  for (const m of mensajes) {
+    const chatId = m.chat_id;
+    if (!porChat.has(chatId)) porChat.set(chatId, []);
+    porChat.get(chatId).push(m);
+  }
+
+  const temas = [];
+  const idsProcesados = [];
+
+  for (const [chatId, chatMensajes] of porChat) {
+    const chatNombre = chatMensajes[0].chat_nombre || chatId;
+    console.log(`[Gemini] Analizando chat "${chatNombre}" (${chatMensajes.length} mensajes)`);
+    try {
+      const resultado = await analizarChat(chatNombre, chatMensajes);
+      // Agregar campo chat a cada tema para compatibilidad con resumenPeriodo
+      resultado.temas.forEach((t) => { if (!t.chat) t.chat = chatNombre; });
+      temas.push(...resultado.temas);
+      idsProcesados.push(...resultado.idsProcesados);
+    } catch (err) {
+      console.error(`[Gemini] Error analizando chat "${chatNombre}":`, err.message);
     }
   }
 
@@ -156,4 +223,4 @@ async function analizarIndividuales(mensajes) {
   return { eventos, compromisos, pedidos, idsProcesados };
 }
 
-module.exports = { analizarMensajes, analizarIndividuales };
+module.exports = { analizarMensajes, analizarChat, analizarIndividuales };

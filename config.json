@@ -1,29 +1,19 @@
 {
-  "vips": [
-    "5491112345678",
-    "5491187654321"
-  ],
+  "nombre_dueno": "",
+  "vips": ["5491112345678", "5491187654321"],
   "grupos": [
-    "Roperito St. Xavier. (PÁG. Amarillas )",
-    "5° GRADO MIXTO",
-    "SX Papis de 5° grado",
-    "El Rosario Informa"
+    { "nombre": "Roperito St. Xavier. (PÁG. Amarillas )", "frecuencia_horas": 8 },
+    { "nombre": "5° GRADO MIXTO", "frecuencia_horas": 8 },
+    { "nombre": "SX Papis de 5° grado", "frecuencia_horas": 8 },
+    { "nombre": "El Rosario Informa", "frecuencia_horas": 24 }
   ],
-  "keywords": [
-    "urgente",
-    "importante",
-    "reunión",
-    "deadline",
-    "pago",
-    "factura",
-    "llamame",
-    "llámame"
-  ],
+  "keywords": ["urgente", "importante", "reunión", "deadline", "pago", "factura", "llamame", "llámame"],
   "grupo_resumen": "",
   "monitorear_individuales": true,
+  "frecuencia_individuales_horas": 24,
   "dias_historial": 15,
+  "max_mensajes_por_batch": 5,
   "resumen": {
-    "hora_cron_grupos": "0 12,20 * * *",
     "hora_cron_individuales": "0 22 * * *",
     "max_mensajes_por_batch": 5
   }
