@@ -214,7 +214,21 @@ function iniciarServidor() {
       return;
     }
 
+    if (estadoWA === 'error_db') {
+      res.end(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="10"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:400px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><div style="font-size:3rem;margin-bottom:16px">&#10060;</div><h2 style="margin:0 0 12px;color:#c0392b">Error de base de datos</h2><p style="color:#555">No se pudo conectar a Turso. Revis&#225; las variables TURSO_URL y TURSO_TOKEN en Render.</p><p style="color:#888;font-size:.85rem">Esta p&#225;gina se actualiza cada 10 segundos.</p></div></body></html>`);
+      return;
+    }
+
+    if (estadoWA === 'error_wa') {
+      res.end(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="10"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:400px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><div style="font-size:3rem;margin-bottom:16px">&#10060;</div><h2 style="margin:0 0 12px;color:#c0392b">Error de WhatsApp</h2><p style="color:#555">No se pudo inicializar el cliente de WhatsApp. Revis&#225; los logs en Render para m&#225;s detalles.</p><p style="color:#888;font-size:.85rem">Esta p&#225;gina se actualiza cada 10 segundos.</p></div></body></html>`);
+      return;
+    }
+
     res.end(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="2"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:400px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><div style="font-size:3rem;margin-bottom:16px">&#9203;</div><h2 style="margin:0 0 12px">Arrancando bot...</h2><p style="color:#888;font-size:.85rem">Esta p&#225;gina se actualiza sola cada 2 segundos.</p></div></body></html>`);
+  });
+
+  server.on('error', (err) => {
+    console.error(`[Server] Error al iniciar en puerto ${PORT}:`, err.message);
   });
 
   server.listen(PORT, () => {
@@ -316,17 +330,19 @@ async function main() {
     await conectar();
   } catch (err) {
     console.error(`[Bot] No se pudo conectar a Turso:`, err.message);
-    process.exit(1);
+    estadoWA = 'error_db';
+    return;
   }
   try {
     await iniciarCliente({
-      onQR: (qr) => { estadoWA = 'qr'; qrActual = qr; tsAutenticando = null; console.log(`[WA] QR listo — visitá https://botwp-ikbb.onrender.com para escanearlo`); },
+      onQR: (qr) => { estadoWA = 'qr'; qrActual = qr; tsAutenticando = null; console.log(`[WA] QR listo — abrí https://botwp-ikbb.onrender.com para escanearlo`); },
       onAutenticando: () => { estadoWA = 'autenticando'; qrActual = null; tsAutenticando = Date.now(); console.log(`[WA] QR escaneado — autenticando...`); },
       onListo: () => { const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : '?'; estadoWA = 'conectado'; qrActual = null; console.log(`[WA] ¡Listo! Conectado en ${segs}s`); },
     });
   } catch (err) {
     console.error(`[Bot] No se pudo inicializar WhatsApp:`, err.message);
-    process.exit(1);
+    estadoWA = 'error_wa';
+    return;
   }
   cron.schedule(config.resumen.hora_cron_grupos, procesarMensajesGrupos, { timezone: 'America/Argentina/Buenos_Aires' });
   cron.schedule(config.resumen.hora_cron_individuales, procesarMensajesIndividuales, { timezone: 'America/Argentina/Buenos_Aires' });
