@@ -42,8 +42,14 @@ async function iniciarCliente(callbacks = {}) {
     auth: state,
     logger,
     printQRInTerminal: false,
-    browser: ['BotWP', 'Chrome', '1.0'],
-    syncFullHistory: true,
+    // Identificarse como Safari/macOS reduce la supresión de notificaciones push
+    // en iOS: WhatsApp prioriza el push al teléfono cuando asume que el linked
+    // device es un desktop ocioso en vez de un navegador activo.
+    browser: ['Mac OS', 'Safari', '15.0'],
+    // syncFullHistory:false hace que el bot parezca un cliente "pasivo" para WA,
+    // reduciendo aún más la supresión de notificaciones. Costo: si el bot se cae
+    // y reconecta, no rellena historial — pero en Render corre 24/7.
+    syncFullHistory: false,
     markOnlineOnConnect: false,
   });
 
