@@ -1,14 +1,14 @@
 # Instrucciones para Claude Code
 
 ## Qué es este proyecto
-Bot de WhatsApp que monitorea mensajes cada hora, analiza con Gemini si son importantes, y manda un resumen al chat privado del dueño.
+Bot de WhatsApp que monitorea mensajes, analiza con Gemini si son importantes, y manda **dos resúmenes (digests) por día — 11:00 y 21:00** al chat privado del dueño. Cada digest es un único mensaje consolidado con un bloque "📌 Para vos" (lo accionable, deduplicado) arriba y la info de grupos abajo. Los horarios se configuran en `config.json` → `resumen.horas_digest`.
 
 ## Stack — no cambiar sin preguntar
 - Node.js (CommonJS, no ESModules)
 - @whiskeysockets/baileys para automatizar WhatsApp
 - @google/generative-ai para Gemini 2.5 Flash Lite
 - @libsql/client para Turso (base de datos)
-- node-cron para el scheduler cada hora
+- node-cron para el scheduler de los digests (11:00 y 21:00)
 - dotenv para variables de entorno
 
 ## Hosting — no cambiar sin preguntar
@@ -34,8 +34,9 @@ config.json    → configuración editable por el usuario
 3. Siempre manejar errores con try/catch — el bot no debe caerse por un mensaje raro
 4. Los logs deben ser claros: indicar qué hora es, cuántos mensajes se procesaron, si hubo errores
 5. No agregar dependencias nuevas sin preguntar primero
-6. Gemini siempre en batches de 5 mensajes por llamada para no desperdiciar cuota
+6. Gemini en batches de ~25 mensajes por llamada (`config.max_mensajes_por_batch`). Se subió desde 5 para darle más contexto al modelo: menos fragmentación de temas, menos duplicados y menos llamadas (más barato, no más)
 7. La sesión de WhatsApp se guarda en Turso y se restaura al arrancar
+8. Cada digest enviado se persiste en la tabla `reportes` y se puede auditar en el endpoint `/reportes`
 
 ## Variables de entorno disponibles
 - GEMINI_API_KEY
