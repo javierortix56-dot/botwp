@@ -23,7 +23,6 @@ const {
   limpiarAuth,
   obtenerChatsDistintos,
   obtenerContactos,
-  obtenerMensajesChatSinProcesar,
   guardarReporte,
   obtenerReportes,
 } = require('./db');
@@ -595,18 +594,24 @@ async function generarDigest(etiqueta) {
 
     const { texto, idsProcesados, totalTemas } = await analizarLote(todos, etiqueta);
 
+    let enviado = false;
     try {
-      await enviarTextoLibre(texto);
-      console.log(`[Digest] Enviado — ${totalTemas} temas`);
+      enviado = await enviarTextoLibre(texto);
     } catch (err) {
-      console.error(`[Digest] Error enviando WA:`, err.message);
+      console.error(`[Digest] No se pudo enviar (WA no conectado):`, err.message);
     }
     postNtfy(`Resumen ${etiqueta || ''}`.trim(), texto.replace(/\*/g, '').replace(/_/g, ''));
     await guardarReporte('digest', texto, todos.length, totalTemas);
 
-    await marcarProcesados(idsProcesados);
-    const fallidos = todos.length - idsProcesados.length;
-    console.log(`[Digest] ${idsProcesados.length} mensajes procesados${fallidos > 0 ? `, ${fallidos} quedaron pendientes para el próximo digest` : ''}`);
+    // Solo marcamos procesados si el envío salió bien; si falló, los mensajes
+    // quedan pendientes y el contenido se reintenta en el próximo digest (no se pierde).
+    if (enviado) {
+      await marcarProcesados(idsProcesados);
+      const fallidos = todos.length - idsProcesados.length;
+      console.log(`[Digest] Enviado — ${totalTemas} temas, ${idsProcesados.length} mensajes procesados${fallidos > 0 ? `, ${fallidos} pendientes para el próximo digest` : ''}`);
+    } else {
+      console.warn(`[Digest] Envío fallido — no se marcan procesados, se reintenta en el próximo digest`);
+    }
   } catch (err) {
     console.error(`[Digest] Error general:`, err.message);
   }

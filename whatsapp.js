@@ -174,7 +174,18 @@ async function iniciarCliente(callbacks = {}) {
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
+    // 'notify' = mensajes en vivo. 'append' = mensajes que WhatsApp entrega al
+    // reconectar — típicamente los que llegaron mientras el bot estaba caído por
+    // un redeploy/reinicio de Render. Capturamos ambos para cerrar esas ventanas
+    // ciegas; el índice único de la DB (chat_id, remitente_id, timestamp, cuerpo)
+    // evita duplicados. No tocamos syncFullHistory para no suprimir las push.
+    if (type !== 'notify' && type !== 'append') return;
+
+    const dias = config.dias_historial ?? 15;
+    const limiteTimestamp = Math.floor(Date.now() / 1000) - dias * 86400;
+    const metaCache = new Map(); // evita pedir groupMetadata por cada mensaje en una ráfaga
+    let recuperados = 0;
+
     for (const msg of messages) {
       try {
         if (msg.key.fromMe || !msg.message) continue;
@@ -182,40 +193,51 @@ async function iniciarCliente(callbacks = {}) {
         const cuerpo = extraerCuerpo(msg.message);
         if (!cuerpo) continue;
 
+        const ts = Number(msg.messageTimestamp);
+        // En el catch-up (append) ignoramos lo más viejo que la ventana de historial
+        // para no arrastrar mensajes antiguos a un digest.
+        if (type === 'append' && ts < limiteTimestamp) continue;
+
         const chatId = msg.key.remoteJid;
         const remitenteId = msg.key.participant || chatId;
         const remitente = msg.pushName ?? null;
 
         let chatNombre = remitente;
         if (chatId.endsWith('@g.us')) {
-          try {
-            const meta = await sock.groupMetadata(chatId);
-            chatNombre = meta.subject;
-          } catch {
-            chatNombre = null;
+          if (metaCache.has(chatId)) {
+            chatNombre = metaCache.get(chatId);
+          } else {
+            try {
+              const meta = await sock.groupMetadata(chatId);
+              chatNombre = meta.subject;
+            } catch {
+              chatNombre = null;
+            }
+            metaCache.set(chatId, chatNombre);
           }
         }
 
-        const msgData = {
-          chatId,
-          chatNombre,
-          remitente,
-          remitenteId,
-          cuerpo,
-          timestamp: Number(msg.messageTimestamp),
-        };
+        const msgData = { chatId, chatNombre, remitente, remitenteId, cuerpo, timestamp: ts };
 
         if (!debeAnalizarse(msgData)) continue;
 
         const { esVip, tieneKeyword } = obtenerFlags(msgData);
-        await guardarMensaje({ ...msgData, esVip, tieneKeyword });
+        const insertado = await guardarMensaje({ ...msgData, esVip, tieneKeyword });
 
-        console.log(
-          `[WA] Mensaje guardado — Chat: ${chatNombre ?? chatId} | VIP: ${esVip} | Keyword: ${tieneKeyword}`
-        );
+        if (type === 'notify') {
+          console.log(
+            `[WA] Mensaje guardado — Chat: ${chatNombre ?? chatId} | VIP: ${esVip} | Keyword: ${tieneKeyword}`
+          );
+        } else if (insertado) {
+          recuperados++;
+        }
       } catch (err) {
         console.error(`[WA] Error procesando mensaje entrante:`, err.message);
       }
+    }
+
+    if (type === 'append' && recuperados > 0) {
+      console.log(`[WA] Catch-up al reconectar: ${recuperados} mensajes recuperados (duplicados ignorados)`);
     }
   });
 
@@ -300,8 +322,10 @@ async function enviarTextoLibre(texto) {
   try {
     await sock.sendMessage(destino, { text: texto });
     console.log(`[WA] Texto enviado a ${destino}`);
+    return true;
   } catch (err) {
     console.error(`[WA] Error enviando texto:`, err.message);
+    return false;
   }
 }
 
