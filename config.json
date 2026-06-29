@@ -1,5 +1,5 @@
 {
-  "nombre_dueno": "",
+  "nombre_dueno": "Javier",
   "vips": ["5491112345678", "5491187654321"],
   "grupos": [
     { "nombre": "Roperito St. Xavier. (PÁG. Amarillas )", "frecuencia_horas": 8 },
@@ -12,9 +12,9 @@
   "monitorear_individuales": true,
   "frecuencia_individuales_horas": 24,
   "dias_historial": 15,
-  "max_mensajes_por_batch": 5,
+  "max_mensajes_por_batch": 25,
   "resumen": {
-    "hora_cron_individuales": "0 22 * * *",
-    "max_mensajes_por_batch": 5
+    "horas_digest": ["0 11 * * *", "0 21 * * *"],
+    "max_mensajes_por_batch": 25
   }
 }

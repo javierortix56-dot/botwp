@@ -41,6 +41,15 @@ async function conectar() {
       nombre       TEXT,
       updated_at   INTEGER DEFAULT (unixepoch())
     );
+
+    CREATE TABLE IF NOT EXISTS reportes (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      tipo        TEXT,
+      contenido   TEXT NOT NULL,
+      n_mensajes  INTEGER DEFAULT 0,
+      n_temas     INTEGER DEFAULT 0,
+      creado_en   INTEGER DEFAULT (unixepoch())
+    );
   `);
 
   // Crear índice único para deduplicación. Si ya hay duplicados de antes
@@ -219,6 +228,38 @@ async function obtenerContactos() {
   }
 }
 
+/**
+ * Guarda un reporte enviado (digest o resumen a demanda) para poder auditarlo
+ * después desde /reportes. No falla el flujo si la inserción falla.
+ */
+async function guardarReporte(tipo, contenido, nMensajes = 0, nTemas = 0) {
+  try {
+    await db.execute({
+      sql: `INSERT INTO reportes (tipo, contenido, n_mensajes, n_temas) VALUES (?, ?, ?, ?)`,
+      args: [tipo ?? null, contenido, nMensajes, nTemas],
+    });
+  } catch (err) {
+    console.error(`[DB] Error guardando reporte:`, err.message);
+  }
+}
+
+/**
+ * Devuelve los últimos `limite` reportes, más recientes primero.
+ */
+async function obtenerReportes(limite = 20) {
+  try {
+    const result = await db.execute({
+      sql: `SELECT id, tipo, contenido, n_mensajes, n_temas, creado_en
+            FROM reportes ORDER BY creado_en DESC LIMIT ?`,
+      args: [limite],
+    });
+    return result.rows;
+  } catch (err) {
+    console.error(`[DB] Error leyendo reportes:`, err.message);
+    return [];
+  }
+}
+
 // Auth state para Baileys persistido en Turso.
 // Permite que la sesión sobreviva reinicios del contenedor sin re-escanear QR.
 async function useTursoAuthState() {
@@ -302,4 +343,6 @@ module.exports = {
   actualizarUltimoProcesado,
   guardarContacto,
   obtenerContactos,
+  guardarReporte,
+  obtenerReportes,
 };

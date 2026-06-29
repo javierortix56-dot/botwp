@@ -23,13 +23,12 @@ const {
   limpiarAuth,
   obtenerChatsDistintos,
   obtenerContactos,
-  obtenerMensajesChatSinProcesar,
-  obtenerUltimoProcesado,
-  actualizarUltimoProcesado,
+  guardarReporte,
+  obtenerReportes,
 } = require('./db');
-const { iniciarCliente, enviarResumen, enviarTextoLibre } = require('./whatsapp');
-const { analizarMensajes, analizarChat, analizarIndividuales } = require('./gemini');
-const { obtenerFrecuenciaGrupo, obtenerConfigGrupo } = require('./filtros');
+const { iniciarCliente, enviarTextoLibre } = require('./whatsapp');
+const { analizarChat, analizarIndividuales } = require('./gemini');
+const { recargar: recargarFiltros } = require('./filtros');
 
 let config = require('./config.json');
 
@@ -41,6 +40,7 @@ function recargarConfig() {
   try {
     delete require.cache[require.resolve('./config.json')];
     config = require('./config.json');
+    recargarFiltros(); // que el filtro de captura use los grupos/VIPs nuevos sin reiniciar
     console.log(`[Config] Recargada`);
   } catch (err) {
     console.error(`[Config] Error recargando:`, err.message);
@@ -66,12 +66,6 @@ function postNtfy(title, body) {
   req.end();
 }
 
-function notificarNtfy(temas) {
-  if (!temas.length) return;
-  const resumen = temas.map((t) => `- ${t.tema}: ${t.resumen}`).join('\n');
-  postNtfy(`Resumen grupos - ${temas.length} tema${temas.length > 1 ? 's' : ''}`, resumen);
-}
-
 function resolverNombreIndiv(raw, contactos) {
   if (!raw) return 'Desconocido';
   if (raw.includes('@')) {
@@ -83,115 +77,98 @@ function resolverNombreIndiv(raw, contactos) {
   return raw;
 }
 
-function formatearResumenIndividuales(eventos, compromisos, pedidos, contactos = new Map()) {
-  const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-  const lineas = ['\u{1F4F1} *Resumen diario ' + hora + '*\n'];
-
-  // Agrupar todo por nombre de contacto/chat
-  const porChat = new Map();
-  const agregar = (rawChat, tipo, item) => {
-    const nombre = resolverNombreIndiv(rawChat, contactos);
-    if (!porChat.has(nombre)) porChat.set(nombre, { eventos: [], pedidos: [], compromisos: [] });
-    porChat.get(nombre)[tipo].push(item);
-  };
-
-  eventos.forEach((e) => agregar(e.chat, 'eventos', e));
-  pedidos.forEach((p) => agregar(p.chat || p.de, 'pedidos', p));
-  compromisos.forEach((c) => agregar(c.chat, 'compromisos', c));
-
-  if (!porChat.size) {
-    lineas.push('_Sin novedades importantes._');
-    return lineas.join('\n');
-  }
-
-  for (const [chatNombre, items] of porChat) {
-    lineas.push(`\u{1F464} *${chatNombre}*`);
-    items.eventos.forEach((e) => {
-      lineas.push(`  \u{1F4C5} ${e.fecha} — ${e.titulo}`);
-      if (e.detalle) lineas.push(`    ${e.detalle}`);
-    });
-    items.pedidos.forEach((p) => {
-      lineas.push(`  \u{1F4EC} ${p.pedido}`);
-      if (p.contexto) lineas.push(`    ${p.contexto}`);
-    });
-    items.compromisos.forEach((c) => {
-      lineas.push(`  ✅ *${c.tema}*: ${c.resumen}`);
-    });
-    lineas.push('');
-  }
-
-  return lineas.join('\n').trimEnd();
-}
-
-function notificarCalendario(eventos, compromisos, pedidos, contactos = new Map()) {
-  if (!eventos.length && !compromisos.length && !pedidos.length) return;
-  const lineas = [];
-  if (eventos.length) {
-    lineas.push('EVENTOS:');
-    eventos.forEach((e) => {
-      lineas.push(`- ${e.fecha} | ${e.titulo} (${resolverNombreIndiv(e.chat, contactos)})`);
-      if (e.detalle) lineas.push(`  ${e.detalle}`);
-    });
-  }
-  if (pedidos.length) {
-    if (lineas.length) lineas.push('');
-    lineas.push('TE PIDEN:');
-    pedidos.forEach((p) => {
-      lineas.push(`- ${resolverNombreIndiv(p.de, contactos)}: ${p.pedido}`);
-      if (p.contexto) lineas.push(`  ${p.contexto}`);
-    });
-  }
-  if (compromisos.length) {
-    if (lineas.length) lineas.push('');
-    lineas.push('TUS PENDIENTES:');
-    compromisos.forEach((c) => {
-      lineas.push(`- ${c.tema} (${resolverNombreIndiv(c.chat, contactos)}): ${c.resumen}`);
-    });
-  }
-  const total = eventos.length + compromisos.length + pedidos.length;
-  postNtfy(`Resumen diario - ${total} items`, lineas.join('\n'));
+function normalizarClave(s) {
+  return (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
 /**
- * Formatea el resumen de un chat con sus temas para enviar por WA.
- * Ordena: primero me_piden:true, luego por tipo (accion → pago → evento → info).
+ * Arma UN solo mensaje consolidado (digest):
+ *  - Bloque "📌 Para vos": todo lo accionable (de grupos + individuales),
+ *    deduplicado, dividido en acciones / pagos / fechas.
+ *  - Bloque "👥 De los grupos (info)": el resto de contexto, por grupo.
+ * Cada ítem indica su origen entre paréntesis para distinguir grupo vs persona.
  */
-function formatearResumenChat(chatNombre, temas) {
-  if (!temas.length) return '';
+function formatearDigest(resumenesChats, resIndiv, contactos, meta = {}) {
+  const { etiqueta, totalMensajes = 0, nGrupos = 0, nIndiv = 0 } = meta;
+  const fecha = new Date().toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' });
+  const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
 
-  const ORDEN_TIPO = { accion: 0, pago: 1, evento: 2, info: 3 };
-  const EMOJI_TIPO = { accion: '🔴', pago: '💰', evento: '📅', info: 'ℹ️' };
+  const titulo = etiqueta ? `📋 *Resumen ${etiqueta} — ${fecha} ${hora}*` : `📋 *Resumen — ${fecha} ${hora}*`;
+  const out = [titulo, `_${totalMensajes} mensajes · ${nGrupos} grupos · ${nIndiv} individuales_`];
 
-  // Separar los que me piden directamente
-  const mePiden = temas.filter((t) => t.me_piden);
-  const resto = temas.filter((t) => !t.me_piden);
+  const acciones = [];
+  const pagos = [];
+  const fechas = [];
+  const vistos = new Set();
+  const agregar = (arr, linea, clave) => {
+    const k = normalizarClave(clave);
+    if (k && vistos.has(k)) return;
+    if (k) vistos.add(k);
+    arr.push(linea);
+  };
 
-  // Ordenar el resto por tipo
-  resto.sort((a, b) => (ORDEN_TIPO[a.tipo] ?? 3) - (ORDEN_TIPO[b.tipo] ?? 3));
-
-  // Ordenados: primero me_piden, luego resto
-  const ordenados = [...mePiden, ...resto];
-
-  const lineas = [`📋 *${chatNombre}*\n`];
-
-  // Sección especial "Te piden directamente" al inicio si hay me_piden
-  if (mePiden.length) {
-    lineas.push('📬 *Te piden directamente:*');
-    mePiden.forEach((t) => {
-      lineas.push(`  • ${t.de}: ${t.accion || t.resumen}`);
-    });
-    lineas.push('');
+  // Accionables desde grupos
+  for (const { chatNombre, temas } of resumenesChats) {
+    for (const t of temas) {
+      if (t.me_piden || t.tipo === 'accion') {
+        const q = t.accion || t.resumen;
+        agregar(acciones, `🔴 ${q} _(${chatNombre}${t.de ? ` · ${t.de}` : ''})_`, `${t.tema}${q}`);
+      } else if (t.tipo === 'pago') {
+        agregar(pagos, `💰 ${t.resumen} _(${chatNombre})_`, `${t.tema}${t.resumen}`);
+      } else if (t.tipo === 'evento') {
+        agregar(fechas, `📅 ${t.resumen} _(${chatNombre})_`, `${t.tema}${t.resumen}`);
+      }
+    }
   }
 
-  // Todos los temas ordenados con su emoji y detalle
-  ordenados.forEach((t) => {
-    const emoji = EMOJI_TIPO[t.tipo] || '•';
-    lineas.push(`${emoji} *De: ${t.de}* — ${t.tema}`);
-    lineas.push(`  ${t.resumen}`);
-    if (t.accion) lineas.push(`  _→ ${t.accion}_`);
+  // Accionables desde individuales (todo pedido/compromiso/evento es para el dueño)
+  (resIndiv.pedidos || []).forEach((p) => {
+    const nombre = resolverNombreIndiv(p.chat || p.de, contactos);
+    agregar(acciones, `🔴 ${p.pedido} _(${nombre})_`, `${p.de}${p.pedido}`);
+  });
+  (resIndiv.compromisos || []).forEach((c) => {
+    const nombre = resolverNombreIndiv(c.chat, contactos);
+    agregar(acciones, `🔴 ${c.tema}: ${c.resumen} _(${nombre})_`, `${c.tema}${c.resumen}`);
+  });
+  (resIndiv.eventos || []).forEach((e) => {
+    const nombre = resolverNombreIndiv(e.chat, contactos);
+    agregar(fechas, `📅 ${e.fecha} — ${e.titulo} _(${nombre})_`, `${e.titulo}${e.fecha}`);
   });
 
-  return lineas.join('\n').trim();
+  out.push('');
+  out.push('📌 *Para vos*');
+  if (acciones.length || pagos.length || fechas.length) {
+    acciones.forEach((l) => out.push(l));
+    pagos.forEach((l) => out.push(l));
+    fechas.forEach((l) => out.push(l));
+  } else {
+    out.push('_Nada que requiera acción._');
+  }
+
+  // Info de grupos (temas tipo info que no entraron arriba)
+  const bloquesInfo = [];
+  for (const { chatNombre, temas } of resumenesChats) {
+    const infos = temas.filter((t) => t.tipo === 'info' && !t.me_piden);
+    if (!infos.length) continue;
+    const lineas = [`📋 *${chatNombre}*`];
+    const vistosInfo = new Set();
+    infos.forEach((t) => {
+      const k = normalizarClave(t.resumen);
+      if (k && vistosInfo.has(k)) return;
+      if (k) vistosInfo.add(k);
+      lineas.push(`  ℹ️ ${t.resumen}`);
+    });
+    if (lineas.length > 1) bloquesInfo.push(lineas.join('\n'));
+  }
+  if (bloquesInfo.length) {
+    out.push('');
+    out.push('━━━━━━━━━━');
+    out.push('👥 *De los grupos (info)*');
+    out.push('');
+    out.push(bloquesInfo.join('\n\n'));
+  }
+
+  return out.join('\n').trim();
 }
 
 let estadoWA = 'arrancando';
@@ -410,6 +387,24 @@ function iniciarServidor() {
       return;
     }
 
+    // GET /reportes — historial de digests enviados (auditoría)
+    if (req.url === '/reportes' && req.method === 'GET') {
+      try {
+        const reportes = await obtenerReportes(20);
+        const items = reportes.length
+          ? reportes.map((r) => {
+              const fecha = new Date(r.creado_en * 1000).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
+              const cuerpo = String(r.contenido).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+              return `<details style="background:#fff;border-radius:8px;margin:10px 0;padding:14px 18px;box-shadow:0 1px 6px rgba(0,0,0,.06)"><summary style="cursor:pointer;font-weight:600">${fecha} · <span style="color:#888;font-weight:400">${r.tipo || 'digest'} — ${r.n_mensajes} msgs, ${r.n_temas} temas</span></summary><pre style="white-space:pre-wrap;font-family:inherit;margin:12px 0 0;color:#333">${cuerpo}</pre></details>`;
+            }).join('')
+          : '<p style="color:#888">Todavía no hay reportes guardados.</p>';
+        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reportes</title></head><body style="font-family:sans-serif;background:#f0f2f5;margin:0;padding:24px 16px"><div style="max-width:700px;margin:0 auto"><a href="/" style="color:#075e54;text-decoration:none;font-size:.9rem">← Volver</a><h2>📜 Últimos reportes enviados</h2>${items}</div></body></html>`);
+      } catch (err) {
+        res.end(`<p>Error: ${err.message}</p>`);
+      }
+      return;
+    }
+
     // GET /configurar — página de configuración de chats
     if (req.url === '/configurar' && req.method === 'GET') {
       try {
@@ -463,7 +458,7 @@ function iniciarServidor() {
     }
 
     if (estadoWA === 'conectado') {
-      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>&#9989; WhatsApp conectado</h2><p>El bot est&#225; activo y escuchando mensajes.</p><h3 style="margin-top:32px;color:#555">Res&#250;menes por per&#237;odo</h3><p style="color:#888;font-size:.85rem;margin:0 0 12px">Analiza todos los mensajes (le&#237;dos y no le&#237;dos) del per&#237;odo elegido</p><p><a href="/resumen?h=24" style="display:inline-block;margin:6px;padding:10px 24px;background:#27ae60;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 24 horas</a></p><p><a href="/resumen?h=72" style="display:inline-block;margin:6px;padding:10px 24px;background:#16a085;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 72 horas</a></p><p><a href="/resumen?h=168" style="display:inline-block;margin:6px;padding:10px 24px;background:#117a65;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltima semana</a></p><h3 style="margin-top:32px;color:#555">Configuraci&#243;n</h3><p><a href="/configurar" style="display:inline-block;margin:6px;padding:10px 24px;background:#6c3483;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#9881;&#65039; Configurar chats</a></p><h3 style="margin-top:32px;color:#555">Mantenimiento</h3><p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p><p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Procesar mensajes nuevos (cron manual)</a></p><p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Revisar historial completo</a></p><p style="margin-top:24px"><a href="/limpiar-sesion" style="display:inline-block;margin:6px;padding:8px 20px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem" onclick="return confirm('Borrar sesi&#243;n?')">Limpiar sesi&#243;n y re-sincronizar</a></p></body></html>`);
+      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>&#9989; WhatsApp conectado</h2><p>El bot est&#225; activo y escuchando mensajes.</p><h3 style="margin-top:32px;color:#555">Res&#250;menes por per&#237;odo</h3><p style="color:#888;font-size:.85rem;margin:0 0 12px">Analiza todos los mensajes (le&#237;dos y no le&#237;dos) del per&#237;odo elegido</p><p><a href="/resumen?h=24" style="display:inline-block;margin:6px;padding:10px 24px;background:#27ae60;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 24 horas</a></p><p><a href="/resumen?h=72" style="display:inline-block;margin:6px;padding:10px 24px;background:#16a085;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 72 horas</a></p><p><a href="/resumen?h=168" style="display:inline-block;margin:6px;padding:10px 24px;background:#117a65;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltima semana</a></p><h3 style="margin-top:32px;color:#555">Configuraci&#243;n</h3><p><a href="/configurar" style="display:inline-block;margin:6px;padding:10px 24px;background:#6c3483;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#9881;&#65039; Configurar chats</a></p><p><a href="/reportes" style="display:inline-block;margin:6px;padding:10px 24px;background:#34495e;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128220; Ver reportes enviados</a></p><h3 style="margin-top:32px;color:#555">Mantenimiento</h3><p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p><p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Procesar mensajes nuevos (cron manual)</a></p><p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Revisar historial completo</a></p><p style="margin-top:24px"><a href="/limpiar-sesion" style="display:inline-block;margin:6px;padding:8px 20px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem" onclick="return confirm('Borrar sesi&#243;n?')">Limpiar sesi&#243;n y re-sincronizar</a></p></body></html>`);
       return;
     }
 
@@ -505,6 +500,61 @@ function iniciarServidor() {
   });
 }
 
+/**
+ * Analiza un conjunto de mensajes (grupales + individuales) y arma el digest.
+ * Devuelve { texto, resumenesChats, resIndiv, idsProcesados, totalTemas, meta }.
+ * No envía ni marca nada — eso lo deciden los callers (digest vs período).
+ */
+async function analizarLote(todos, etiqueta) {
+  const grupales = todos.filter((m) => m.chat_id?.endsWith('@g.us'));
+  const individuales = todos.filter((m) => !m.chat_id?.endsWith('@g.us'));
+
+  const contactos = await obtenerContactos().catch(() => new Map());
+
+  // Grupos: agrupar por chat y analizar cada uno
+  const porChat = new Map();
+  for (const m of grupales) {
+    if (!porChat.has(m.chat_id)) porChat.set(m.chat_id, []);
+    porChat.get(m.chat_id).push(m);
+  }
+  const resumenesChats = [];
+  const idsProcesados = [];
+  for (const [chatId, mensajesChat] of porChat) {
+    const chatNombre = mensajesChat[0].chat_nombre || chatId;
+    console.log(`[Análisis${etiqueta ? ' ' + etiqueta : ''}] "${chatNombre}" (${mensajesChat.length} mensajes)`);
+    try {
+      const { temas, idsProcesados: ids } = await analizarChat(chatNombre, mensajesChat);
+      idsProcesados.push(...ids);
+      if (temas.length) resumenesChats.push({ chatNombre, temas });
+    } catch (err) {
+      console.error(`[Análisis] Error analizando "${chatNombre}":`, err.message);
+    }
+  }
+
+  // Individuales
+  let resIndiv = { eventos: [], compromisos: [], pedidos: [] };
+  if (individuales.length) {
+    try {
+      const r = await analizarIndividuales(individuales, contactos);
+      resIndiv = r;
+      idsProcesados.push(...(r.idsProcesados || []));
+    } catch (err) {
+      console.error(`[Análisis] Error analizando individuales:`, err.message);
+    }
+  }
+
+  const meta = { etiqueta, totalMensajes: todos.length, nGrupos: porChat.size, nIndiv: individuales.length };
+  const texto = formatearDigest(resumenesChats, resIndiv, contactos, meta);
+  const totalTemas = resumenesChats.reduce((a, r) => a + r.temas.length, 0)
+    + (resIndiv.eventos?.length || 0) + (resIndiv.compromisos?.length || 0) + (resIndiv.pedidos?.length || 0);
+
+  return { texto, idsProcesados, totalTemas, meta };
+}
+
+/**
+ * Resumen a demanda por ventana de tiempo (endpoint /resumen).
+ * Lee TODOS los mensajes del período (leídos y no leídos), no marca procesados.
+ */
 async function resumenPeriodo(horas) {
   const labelHoras = horas === 168 ? '7 días' : `${horas}h`;
   console.log(`\n[Resumen ${labelHoras}] Iniciando...`);
@@ -515,166 +565,61 @@ async function resumenPeriodo(horas) {
     try { await enviarTextoLibre(`📋 *Resumen últimas ${labelHoras}*\n\nNo hay mensajes en este período.`); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message); }
     return;
   }
-  const grupales = todos.filter((m) => m.chat_id?.endsWith('@g.us'));
-  const individuales = todos.filter((m) => !m.chat_id?.endsWith('@g.us'));
-  console.log(`[Resumen ${labelHoras}] ${todos.length} mensajes — ${grupales.length} grupales, ${individuales.length} individuales`);
 
-  // Agrupar mensajes grupales por chat_id y analizar cada chat por separado
-  const porChat = new Map();
-  for (const m of grupales) {
-    if (!porChat.has(m.chat_id)) porChat.set(m.chat_id, []);
-    porChat.get(m.chat_id).push(m);
-  }
-
-  const resumenesChats = [];
-  for (const [chatId, mensajesChat] of porChat) {
-    const chatNombre = mensajesChat[0].chat_nombre || chatId;
-    console.log(`[Resumen ${labelHoras}] Analizando "${chatNombre}" (${mensajesChat.length} mensajes)`);
-    try {
-      const { temas } = await analizarChat(chatNombre, mensajesChat);
-      if (temas.length) resumenesChats.push({ chatNombre, temas });
-    } catch (err) {
-      console.error(`[Resumen ${labelHoras}] Error analizando "${chatNombre}":`, err.message);
-    }
-  }
-
-  const contactos = await obtenerContactos().catch(() => new Map());
-
-  let resIndiv = { eventos: [], compromisos: [], pedidos: [] };
-  if (individuales.length) {
-    try { resIndiv = await analizarIndividuales(individuales, contactos); } catch (err) { console.error(`[Resumen ${labelHoras}] Error analizando individuales:`, err.message); }
-  }
-
-  // Armar un único mensaje con todo el resumen
-  const lineas = [
-    `📋 *Resumen últimas ${labelHoras}*`,
-    `_${todos.length} mensajes — ${grupales.length} grupales, ${individuales.length} individuales_`,
-  ];
-
-  if (resumenesChats.length) {
-    for (const { chatNombre, temas } of resumenesChats) {
-      lineas.push('');
-      lineas.push(formatearResumenChat(chatNombre, temas));
-    }
-  }
-
-  if (resIndiv.eventos.length || resIndiv.compromisos.length || resIndiv.pedidos.length) {
-    lineas.push('');
-    lineas.push(formatearResumenIndividuales(resIndiv.eventos, resIndiv.compromisos, resIndiv.pedidos, contactos));
-  }
-
-  if (!resumenesChats.length && !resIndiv.eventos.length && !resIndiv.compromisos.length && !resIndiv.pedidos.length) {
-    lineas.push('');
-    lineas.push('_Sin temas relevantes en este período._');
-  }
-
-  const texto = lineas.join('\n');
+  const { texto, totalTemas } = await analizarLote(todos, `últimas ${labelHoras}`);
   try {
     await enviarTextoLibre(texto);
-    const totalTemas = resumenesChats.reduce((acc, r) => acc + r.temas.length, 0);
-    console.log(`[Resumen ${labelHoras}] Enviado — ${resumenesChats.length} chats con temas, ${totalTemas} temas totales`);
+    console.log(`[Resumen ${labelHoras}] Enviado — ${totalTemas} temas`);
     postNtfy(`Resumen ${labelHoras}`, texto.replace(/\*/g, '').replace(/_/g, ''));
+    await guardarReporte(`periodo_${horas}h`, texto, todos.length, totalTemas);
   } catch (err) {
     console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message);
   }
 }
 
 /**
- * Cron grupos: corre cada 30 minutos.
- * Para cada chat grupal sin procesar, verifica si corresponde procesarlo según su frecuencia_horas.
+ * Digest programado (11:00 y 21:00): barre TODOS los mensajes sin procesar
+ * —grupos e individuales juntos—, arma un único mensaje consolidado, lo envía,
+ * lo persiste y marca los mensajes como procesados.
  */
-async function procesarMensajesGrupos() {
+async function generarDigest(etiqueta) {
   const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-  console.log(`\n[Cron grupos] Iniciando — ${hora}`);
+  console.log(`\n[Digest${etiqueta ? ' ' + etiqueta : ''}] Iniciando — ${hora}`);
   try {
     const todos = await obtenerMensajesSinProcesar();
-    const grupales = todos.filter((m) => m.chat_id?.endsWith('@g.us'));
-    console.log(`[Cron grupos] ${grupales.length} mensajes grupales sin procesar`);
-    if (!grupales.length) { console.log(`[Cron grupos] Nada que analizar`); return; }
-
-    // Agrupar por chat_id
-    const porChat = new Map();
-    for (const m of grupales) {
-      const chatId = m.chat_id;
-      if (!porChat.has(chatId)) porChat.set(chatId, []);
-      porChat.get(chatId).push(m);
+    if (!todos.length) {
+      console.log(`[Digest] Sin mensajes pendientes — nada que enviar`);
+      return;
     }
 
-    const ahora = Math.floor(Date.now() / 1000);
+    const { texto, idsProcesados, totalTemas } = await analizarLote(todos, etiqueta);
 
-    for (const [chatId, mensajesChat] of porChat) {
-      const chatNombre = mensajesChat[0].chat_nombre || chatId;
-      const frecuencia = obtenerFrecuenciaGrupo(chatNombre);
-
-      if (frecuencia === null) {
-        console.log(`[Cron grupos] "${chatNombre}" — no configurado, skip`);
-        continue;
-      }
-
-      const chatNombreKey = chatNombre.toLowerCase().trim();
-      const ultimoProcesado = await obtenerUltimoProcesado(chatNombreKey);
-      const segundosTranscurridos = ahora - ultimoProcesado;
-      const segundosFrecuencia = frecuencia * 3600;
-
-      if (segundosTranscurridos < segundosFrecuencia) {
-        const minutosRestantes = Math.round((segundosFrecuencia - segundosTranscurridos) / 60);
-        console.log(`[Cron grupos] "${chatNombre}" — faltan ${minutosRestantes} min para próximo proceso, skip`);
-        continue;
-      }
-
-      console.log(`[Cron grupos] Procesando "${chatNombre}" (${mensajesChat.length} mensajes, frecuencia ${frecuencia}h)`);
-      try {
-        const { temas, idsProcesados } = await analizarChat(chatNombre, mensajesChat);
-
-        if (temas.length) {
-          const texto = formatearResumenChat(chatNombre, temas);
-          try { await enviarTextoLibre(texto); } catch (err) { console.error(`[Cron grupos] Error enviando WA para "${chatNombre}":`, err.message); }
-          notificarNtfy(temas);
-        } else {
-          console.log(`[Cron grupos] "${chatNombre}" — sin temas relevantes`);
-        }
-
-        await marcarProcesados(idsProcesados);
-        await actualizarUltimoProcesado(chatNombreKey);
-
-        console.log(`[Cron grupos] "${chatNombre}" OK — ${temas.length} temas, ${idsProcesados.length} mensajes procesados`);
-      } catch (err) {
-        console.error(`[Cron grupos] Error procesando "${chatNombre}":`, err.message);
-      }
+    let enviado = false;
+    try {
+      enviado = await enviarTextoLibre(texto);
+    } catch (err) {
+      console.error(`[Digest] No se pudo enviar (WA no conectado):`, err.message);
     }
+    postNtfy(`Resumen ${etiqueta || ''}`.trim(), texto.replace(/\*/g, '').replace(/_/g, ''));
+    await guardarReporte('digest', texto, todos.length, totalTemas);
 
-    console.log(`[Cron grupos] Ciclo completo`);
+    // Solo marcamos procesados si el envío salió bien; si falló, los mensajes
+    // quedan pendientes y el contenido se reintenta en el próximo digest (no se pierde).
+    if (enviado) {
+      await marcarProcesados(idsProcesados);
+      const fallidos = todos.length - idsProcesados.length;
+      console.log(`[Digest] Enviado — ${totalTemas} temas, ${idsProcesados.length} mensajes procesados${fallidos > 0 ? `, ${fallidos} pendientes para el próximo digest` : ''}`);
+    } else {
+      console.warn(`[Digest] Envío fallido — no se marcan procesados, se reintenta en el próximo digest`);
+    }
   } catch (err) {
-    console.error(`[Cron grupos] Error general:`, err.message);
+    console.error(`[Digest] Error general:`, err.message);
   }
 }
 
-async function procesarMensajesIndividuales() {
-  const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-  console.log(`\n[Cron individuales] Iniciando — ${hora}`);
-  try {
-    const todos = await obtenerMensajesSinProcesar();
-    const individuales = todos.filter((m) => !m.chat_id?.endsWith('@g.us'));
-    console.log(`[Cron individuales] ${individuales.length} mensajes individuales sin procesar`);
-    if (!individuales.length) { console.log(`[Cron individuales] Nada que analizar`); return; }
-    const contactos = await obtenerContactos().catch(() => new Map());
-    const { eventos, compromisos, pedidos, idsProcesados } = await analizarIndividuales(individuales, contactos);
-    notificarCalendario(eventos, compromisos, pedidos, contactos);
-    if (eventos.length || compromisos.length || pedidos.length) {
-      const texto = formatearResumenIndividuales(eventos, compromisos, pedidos, contactos);
-      try { await enviarTextoLibre(texto); } catch (err) { console.error(`[Cron individuales] Error enviando a WA:`, err.message); }
-    }
-    await marcarProcesados(idsProcesados);
-    const fallidos = individuales.length - idsProcesados.length;
-    console.log(`[Cron individuales] Completo — ${eventos.length} eventos, ${compromisos.length} compromisos, ${pedidos.length} pedidos, ${idsProcesados.length} mensajes procesados${fallidos > 0 ? `, ${fallidos} quedaron pendientes para el próximo ciclo` : ''}`);
-  } catch (err) {
-    console.error(`[Cron individuales] Error:`, err.message);
-  }
-}
-
+// Alias para los endpoints de mantenimiento que disparan un digest manual.
 async function procesarMensajes() {
-  await procesarMensajesGrupos();
-  await procesarMensajesIndividuales();
+  await generarDigest('manual');
 }
 
 async function main() {
@@ -703,14 +648,13 @@ async function main() {
     return;
   }
 
-  // Cron grupos: cada 30 minutos — verifica por frecuencia de cada chat
-  cron.schedule('0,30 * * * *', procesarMensajesGrupos, { timezone: 'America/Argentina/Buenos_Aires' });
-
-  // Cron individuales: según config o default 22:00
-  const cronIndividuales = config.resumen?.hora_cron_individuales || '0 22 * * *';
-  cron.schedule(cronIndividuales, procesarMensajesIndividuales, { timezone: 'America/Argentina/Buenos_Aires' });
-
-  console.log(`[Bot] Crones activos — grupos "0,30 * * * *" (cada 30 min), individuales "${cronIndividuales}"`);
+  // Digest a horas fijas (default 11:00 y 21:00). Cada disparo barre TODOS los
+  // mensajes sin procesar (grupos + individuales) en un único mensaje consolidado.
+  const horasDigest = config.resumen?.horas_digest || ['0 11 * * *', '0 21 * * *'];
+  horasDigest.forEach((expr) => {
+    cron.schedule(expr, () => generarDigest(), { timezone: 'America/Argentina/Buenos_Aires' });
+  });
+  console.log(`[Bot] Digest programado (America/Argentina/Buenos_Aires): ${horasDigest.join(' , ')}`);
 }
 
 main();

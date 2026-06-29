@@ -1,9 +1,21 @@
-const config = require('./config.json');
+let config = require('./config.json');
 
-const vips = new Set(config.vips.map((n) => n.replace(/\D/g, '')));
-// Soportar grupos como strings (legacy) o como objetos { nombre, frecuencia_horas }
-const gruposNombres = config.grupos.map((g) => (typeof g === 'string' ? g : g.nombre).toLowerCase().trim());
-const keywords = config.keywords.map((k) => k.toLowerCase().trim());
+// Las listas derivadas (vips/grupos/keywords) se recalculan en recargar().
+// Importante: NO son `const` capturadas una sola vez — antes, reconfigurar
+// desde la web no tenía efecto hasta reiniciar Render, así que mensajes de
+// grupos recién agregados no se guardaban. recargar() lo corrige.
+let vips, gruposNombres, keywords;
+
+function recargar() {
+  delete require.cache[require.resolve('./config.json')];
+  config = require('./config.json');
+  vips = new Set(config.vips.map((n) => n.replace(/\D/g, '')));
+  // Soportar grupos como strings (legacy) o como objetos { nombre, frecuencia_horas }
+  gruposNombres = config.grupos.map((g) => (typeof g === 'string' ? g : g.nombre).toLowerCase().trim());
+  keywords = config.keywords.map((k) => k.toLowerCase().trim());
+}
+
+recargar();
 
 function esVip(remitenteId) {
   const numero = (remitenteId || '').replace(/\D/g, '').replace(/^521/, '52');
@@ -71,4 +83,4 @@ function obtenerConfigGrupo(chatNombre) {
   return grupoConfig || null;
 }
 
-module.exports = { debeAnalizarse, obtenerFlags, esVip, esGrupoMonitoreado, tieneKeyword, esIndividual, obtenerFrecuenciaGrupo, obtenerConfigGrupo };
+module.exports = { debeAnalizarse, obtenerFlags, esVip, esGrupoMonitoreado, tieneKeyword, esIndividual, obtenerFrecuenciaGrupo, obtenerConfigGrupo, recargar };
