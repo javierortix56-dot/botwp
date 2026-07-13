@@ -37,6 +37,7 @@ config.json    → configuración editable por el usuario
 6. Gemini en batches de ~25 mensajes por llamada (`config.max_mensajes_por_batch`). Se subió desde 5 para darle más contexto al modelo: menos fragmentación de temas, menos duplicados y menos llamadas (más barato, no más)
 7. La sesión de WhatsApp se guarda en Turso y se restaura al arrancar
 8. Cada digest enviado se persiste en la tabla `reportes` y se puede auditar en el endpoint `/reportes`
+9. **Modo ahorro de notificaciones** (`config.json` → `conexion.modo_ahorro_notificaciones`, default activado): el bot se desconecta de WhatsApp entre tareas para que el teléfono del dueño quede como único dispositivo activo y las push nunca se supriman. Se conecta solo para los digests programados y los pedidos manuales; al reconectar espera a que baje la cola de mensajes offline (`esperarSincronizacion`) antes de analizar, así el digest no sale incompleto. Los mensajes que llegan mientras está desconectado los entrega WhatsApp como `append` al reconectar — no se pierde nada. No cambiar este comportamiento sin preguntar: existe porque al dueño le dejaban de llegar notificaciones al teléfono.
 
 ## Variables de entorno disponibles
 - GEMINI_API_KEY

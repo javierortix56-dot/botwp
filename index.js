@@ -26,7 +26,14 @@ const {
   guardarReporte,
   obtenerReportes,
 } = require('./db');
-const { iniciarCliente, enviarTextoLibre } = require('./whatsapp');
+const {
+  iniciarCliente,
+  enviarTextoLibre,
+  estaConectado,
+  conectarBajoDemanda,
+  desconectar: desconectarWA,
+  esperarSincronizacion,
+} = require('./whatsapp');
 const { analizarChat, analizarIndividuales, generarTitular } = require('./gemini');
 const { recargar: recargarFiltros } = require('./filtros');
 
@@ -251,6 +258,63 @@ let estadoWA = 'arrancando';
 let qrActual = null;
 let tsAutenticando = null;
 
+// ── Modo ahorro de notificaciones ──────────────────────────────────────────
+// El bot se desconecta de WhatsApp entre tareas para que el teléfono quede como
+// único dispositivo activo y las push lleguen siempre. Se conecta solo para los
+// digests programados y los pedidos manuales; lo que llega mientras está
+// desconectado lo entrega WhatsApp al reconectar ('append') — no se pierde nada.
+
+function modoAhorro() {
+  return config.conexion?.modo_ahorro_notificaciones !== false;
+}
+
+let timerDesconexion = null;
+let tareasActivas = 0;
+
+function programarDesconexion(minutos) {
+  if (!modoAhorro()) return;
+  const min = minutos ?? config.conexion?.minutos_conectado_tras_tarea ?? 2;
+  if (timerDesconexion) clearTimeout(timerDesconexion);
+  timerDesconexion = setTimeout(async () => {
+    timerDesconexion = null;
+    if (tareasActivas > 0) return; // hay una tarea corriendo — reprograma al terminar
+    try {
+      await desconectarWA();
+    } catch (err) {
+      console.error(`[Conexión] Error al desconectar:`, err.message);
+    }
+  }, min * 60 * 1000);
+  console.log(`[Conexión] Desconexión programada en ${min} min (modo ahorro de notificaciones)`);
+}
+
+/**
+ * Ejecuta una tarea que necesita WhatsApp: conecta si hace falta, espera a que
+ * baje la cola de mensajes offline (para que el digest no salga incompleto),
+ * corre la tarea y programa la desconexión al terminar.
+ */
+async function conTareaConectada(nombre, fn) {
+  tareasActivas++;
+  if (timerDesconexion) { clearTimeout(timerDesconexion); timerDesconexion = null; }
+  try {
+    if (!estaConectado()) {
+      console.log(`[Conexión] Conectando para: ${nombre}`);
+      await conectarBajoDemanda();
+      console.log(`[Conexión] Conectado — esperando mensajes pendientes de WhatsApp...`);
+      await esperarSincronizacion();
+    }
+    return await fn();
+  } finally {
+    tareasActivas--;
+    if (tareasActivas === 0) programarDesconexion();
+  }
+}
+
+// El bot está operativo (vinculado) tanto conectado como en standby: en standby
+// las tareas conectan solas bajo demanda.
+function botOperativo() {
+  return estadoWA === 'conectado' || estadoWA === 'standby';
+}
+
 function leerBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
@@ -400,7 +464,7 @@ function iniciarServidor() {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
 
     if (req.url === '/test' && req.method === 'GET') {
-      if (estadoWA !== 'conectado') {
+      if (!botOperativo()) {
         res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>&#9888;&#65039; El bot no est&#225; conectado a&#250;n</h2><p>Primero escane&#225; el QR para vincular WhatsApp.</p><a href="/">&#8592; Volver</a></body></html>`);
         return;
       }
@@ -415,7 +479,7 @@ function iniciarServidor() {
     }
 
     if (req.url === '/procesar' && req.method === 'GET') {
-      if (estadoWA !== 'conectado') { res.end(`<p>El bot no est&#225; conectado.</p>`); return; }
+      if (!botOperativo()) { res.end(`<p>El bot no est&#225; conectado.</p>`); return; }
       try {
         await procesarMensajes();
         res.end(`<p>An&#225;lisis ejecutado. Revis&#225; ntfy.</p><a href="/">Volver</a>`);
@@ -426,7 +490,7 @@ function iniciarServidor() {
     }
 
     if (req.url?.startsWith('/resumen') && req.method === 'GET') {
-      if (estadoWA !== 'conectado') { res.end(`<p>El bot no est&#225; conectado.</p>`); return; }
+      if (!botOperativo()) { res.end(`<p>El bot no est&#225; conectado.</p>`); return; }
       const params = new URL(req.url, `http://localhost`).searchParams;
       const horas = Number(params.get('h')) || 24;
       if (![24, 72, 168].includes(horas)) {
@@ -450,7 +514,7 @@ function iniciarServidor() {
     }
 
     if (req.url === '/historial' && req.method === 'GET') {
-      if (estadoWA !== 'conectado') { res.end(`<p>El bot no est&#225; conectado.</p>`); return; }
+      if (!botOperativo()) { res.end(`<p>El bot no est&#225; conectado.</p>`); return; }
       try {
         const todos = await obtenerMensajesSinProcesar();
         const grupales = todos.filter((m) => m.chat_id?.endsWith('@g.us')).length;
@@ -533,8 +597,11 @@ function iniciarServidor() {
       return;
     }
 
-    if (estadoWA === 'conectado') {
-      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>&#9989; WhatsApp conectado</h2><p>El bot est&#225; activo y escuchando mensajes.</p><h3 style="margin-top:32px;color:#555">Res&#250;menes por per&#237;odo</h3><p style="color:#888;font-size:.85rem;margin:0 0 12px">Analiza todos los mensajes (le&#237;dos y no le&#237;dos) del per&#237;odo elegido</p><p><a href="/resumen?h=24" style="display:inline-block;margin:6px;padding:10px 24px;background:#27ae60;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 24 horas</a></p><p><a href="/resumen?h=72" style="display:inline-block;margin:6px;padding:10px 24px;background:#16a085;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 72 horas</a></p><p><a href="/resumen?h=168" style="display:inline-block;margin:6px;padding:10px 24px;background:#117a65;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltima semana</a></p><h3 style="margin-top:32px;color:#555">Configuraci&#243;n</h3><p><a href="/configurar" style="display:inline-block;margin:6px;padding:10px 24px;background:#6c3483;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#9881;&#65039; Configurar chats</a></p><p><a href="/reportes" style="display:inline-block;margin:6px;padding:10px 24px;background:#34495e;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128220; Ver reportes enviados</a></p><h3 style="margin-top:32px;color:#555">Mantenimiento</h3><p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p><p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Procesar mensajes nuevos (cron manual)</a></p><p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Revisar historial completo</a></p><p style="margin-top:24px"><a href="/limpiar-sesion" style="display:inline-block;margin:6px;padding:8px 20px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem" onclick="return confirm('Borrar sesi&#243;n?')">Limpiar sesi&#243;n y re-sincronizar</a></p></body></html>`);
+    if (botOperativo()) {
+      const encabezado = estadoWA === 'standby'
+        ? `<h2>&#128277; Modo ahorro de notificaciones</h2><p>El bot est&#225; vinculado pero <strong>desconectado a prop&#243;sito</strong> para que las notificaciones lleguen siempre a tu tel&#233;fono.<br>Se conecta solo autom&#225;ticamente en los horarios del resumen o cuando ped&#237;s uno manual.</p>`
+        : `<h2>&#9989; WhatsApp conectado</h2><p>El bot est&#225; activo y escuchando mensajes.</p>`;
+      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">${encabezado}<h3 style="margin-top:32px;color:#555">Res&#250;menes por per&#237;odo</h3><p style="color:#888;font-size:.85rem;margin:0 0 12px">Analiza todos los mensajes (le&#237;dos y no le&#237;dos) del per&#237;odo elegido</p><p><a href="/resumen?h=24" style="display:inline-block;margin:6px;padding:10px 24px;background:#27ae60;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 24 horas</a></p><p><a href="/resumen?h=72" style="display:inline-block;margin:6px;padding:10px 24px;background:#16a085;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 72 horas</a></p><p><a href="/resumen?h=168" style="display:inline-block;margin:6px;padding:10px 24px;background:#117a65;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltima semana</a></p><h3 style="margin-top:32px;color:#555">Configuraci&#243;n</h3><p><a href="/configurar" style="display:inline-block;margin:6px;padding:10px 24px;background:#6c3483;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#9881;&#65039; Configurar chats</a></p><p><a href="/reportes" style="display:inline-block;margin:6px;padding:10px 24px;background:#34495e;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128220; Ver reportes enviados</a></p><h3 style="margin-top:32px;color:#555">Mantenimiento</h3><p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p><p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Procesar mensajes nuevos (cron manual)</a></p><p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Revisar historial completo</a></p><p style="margin-top:24px"><a href="/limpiar-sesion" style="display:inline-block;margin:6px;padding:8px 20px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem" onclick="return confirm('Borrar sesi&#243;n?')">Limpiar sesi&#243;n y re-sincronizar</a></p></body></html>`);
       return;
     }
 
@@ -645,22 +712,28 @@ async function analizarLote(todos, etiqueta) {
 async function resumenPeriodo(horas) {
   const labelHoras = horas === 168 ? '7 días' : `${horas}h`;
   console.log(`\n[Resumen ${labelHoras}] Iniciando...`);
-  const desde = Math.floor(Date.now() / 1000) - horas * 3600;
-  const todos = await obtenerMensajesDesde(desde);
-  if (!todos.length) {
-    console.log(`[Resumen ${labelHoras}] Sin mensajes en el período`);
-    try { await enviarTextoLibre(`📋 *Resumen últimas ${labelHoras}*\n\nNo hay mensajes en este período.`); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message); }
-    return;
-  }
-
-  const { texto, totalTemas } = await analizarLote(todos, `últimas ${labelHoras}`);
   try {
-    await enviarTextoLibre(texto);
-    console.log(`[Resumen ${labelHoras}] Enviado — ${totalTemas} temas`);
-    postNtfy(`Resumen ${labelHoras}`, texto.replace(/\*/g, '').replace(/_/g, ''));
-    await guardarReporte(`periodo_${horas}h`, texto, todos.length, totalTemas);
+    await conTareaConectada(`resumen ${labelHoras}`, async () => {
+      const desde = Math.floor(Date.now() / 1000) - horas * 3600;
+      const todos = await obtenerMensajesDesde(desde);
+      if (!todos.length) {
+        console.log(`[Resumen ${labelHoras}] Sin mensajes en el período`);
+        try { await enviarTextoLibre(`📋 *Resumen últimas ${labelHoras}*\n\nNo hay mensajes en este período.`); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message); }
+        return;
+      }
+
+      const { texto, totalTemas } = await analizarLote(todos, `últimas ${labelHoras}`);
+      try {
+        await enviarTextoLibre(texto);
+        console.log(`[Resumen ${labelHoras}] Enviado — ${totalTemas} temas`);
+        postNtfy(`Resumen ${labelHoras}`, texto.replace(/\*/g, '').replace(/_/g, ''));
+        await guardarReporte(`periodo_${horas}h`, texto, todos.length, totalTemas);
+      } catch (err) {
+        console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message);
+      }
+    });
   } catch (err) {
-    console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message);
+    console.error(`[Resumen ${labelHoras}] Error general:`, err.message);
   }
 }
 
@@ -673,45 +746,47 @@ async function generarDigest(etiqueta) {
   const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
   console.log(`\n[Digest${etiqueta ? ' ' + etiqueta : ''}] Iniciando — ${hora}`);
   try {
-    const todos = await obtenerMensajesSinProcesar();
-    if (!todos.length) {
-      // Mensaje corto igual: el dueño sabe que el bot está vivo y no se perdió nada
-      console.log(`[Digest] Sin mensajes pendientes — enviando "todo tranquilo"`);
-      const txt = `✅ *Todo tranquilo* — no hubo mensajes nuevos desde el último resumen.`;
+    await conTareaConectada(`digest${etiqueta ? ' ' + etiqueta : ''}`, async () => {
+      const todos = await obtenerMensajesSinProcesar();
+      if (!todos.length) {
+        // Mensaje corto igual: el dueño sabe que el bot está vivo y no se perdió nada
+        console.log(`[Digest] Sin mensajes pendientes — enviando "todo tranquilo"`);
+        const txt = `✅ *Todo tranquilo* — no hubo mensajes nuevos desde el último resumen.`;
+        try {
+          const ok = await enviarTextoLibre(txt);
+          if (ok) await guardarReporte('digest', txt, 0, 0);
+        } catch (err) {
+          console.error(`[Digest] No se pudo enviar (WA no conectado):`, err.message);
+        }
+        return;
+      }
+
+      let { texto, idsProcesados, totalTemas } = await analizarLote(todos, etiqueta);
+
+      // Hubo mensajes pero nada relevante: mensaje corto en vez del esqueleto del digest
+      if (totalTemas === 0) {
+        texto = `✅ *Todo tranquilo* — revisé ${todos.length} mensajes y no hay nada pendiente para vos. Solo charla.`;
+      }
+
+      let enviado = false;
       try {
-        const ok = await enviarTextoLibre(txt);
-        if (ok) await guardarReporte('digest', txt, 0, 0);
+        enviado = await enviarTextoLibre(texto);
       } catch (err) {
         console.error(`[Digest] No se pudo enviar (WA no conectado):`, err.message);
       }
-      return;
-    }
+      postNtfy(`Resumen ${etiqueta || ''}`.trim(), texto.replace(/\*/g, '').replace(/_/g, ''));
+      await guardarReporte('digest', texto, todos.length, totalTemas);
 
-    let { texto, idsProcesados, totalTemas } = await analizarLote(todos, etiqueta);
-
-    // Hubo mensajes pero nada relevante: mensaje corto en vez del esqueleto del digest
-    if (totalTemas === 0) {
-      texto = `✅ *Todo tranquilo* — revisé ${todos.length} mensajes y no hay nada pendiente para vos. Solo charla.`;
-    }
-
-    let enviado = false;
-    try {
-      enviado = await enviarTextoLibre(texto);
-    } catch (err) {
-      console.error(`[Digest] No se pudo enviar (WA no conectado):`, err.message);
-    }
-    postNtfy(`Resumen ${etiqueta || ''}`.trim(), texto.replace(/\*/g, '').replace(/_/g, ''));
-    await guardarReporte('digest', texto, todos.length, totalTemas);
-
-    // Solo marcamos procesados si el envío salió bien; si falló, los mensajes
-    // quedan pendientes y el contenido se reintenta en el próximo digest (no se pierde).
-    if (enviado) {
-      await marcarProcesados(idsProcesados);
-      const fallidos = todos.length - idsProcesados.length;
-      console.log(`[Digest] Enviado — ${totalTemas} temas, ${idsProcesados.length} mensajes procesados${fallidos > 0 ? `, ${fallidos} pendientes para el próximo digest` : ''}`);
-    } else {
-      console.warn(`[Digest] Envío fallido — no se marcan procesados, se reintenta en el próximo digest`);
-    }
+      // Solo marcamos procesados si el envío salió bien; si falló, los mensajes
+      // quedan pendientes y el contenido se reintenta en el próximo digest (no se pierde).
+      if (enviado) {
+        await marcarProcesados(idsProcesados);
+        const fallidos = todos.length - idsProcesados.length;
+        console.log(`[Digest] Enviado — ${totalTemas} temas, ${idsProcesados.length} mensajes procesados${fallidos > 0 ? `, ${fallidos} pendientes para el próximo digest` : ''}`);
+      } else {
+        console.warn(`[Digest] Envío fallido — no se marcan procesados, se reintenta en el próximo digest`);
+      }
+    });
   } catch (err) {
     console.error(`[Digest] Error general:`, err.message);
   }
@@ -736,7 +811,16 @@ async function main() {
     await iniciarCliente({
       onQR: (qr) => { estadoWA = 'qr'; qrActual = qr; tsAutenticando = null; console.log(`[WA] QR listo — abrí https://botwp-ikbb.onrender.com para escanearlo`); },
       onAutenticando: () => { estadoWA = 'autenticando'; qrActual = null; tsAutenticando = Date.now(); console.log(`[WA] QR escaneado — autenticando...`); },
-      onListo: () => { const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : '?'; estadoWA = 'conectado'; qrActual = null; console.log(`[WA] ¡Listo! Conectado en ${segs}s`); },
+      onListo: () => {
+        const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : '?';
+        estadoWA = 'conectado';
+        qrActual = null;
+        console.log(`[WA] ¡Listo! Conectado en ${segs}s`);
+        // Gracia inicial: dejar que bajen mensajes offline y contactos, y después
+        // pasar a standby para que el teléfono reciba todas las notificaciones.
+        programarDesconexion(config.conexion?.minutos_gracia_arranque ?? 3);
+      },
+      onStandby: () => { estadoWA = 'standby'; },
       onDesconectado: (code) => {
         if (code === 401 || code === 403) { estadoWA = 'qr'; qrActual = null; return; }
         if (estadoWA === 'conectado') estadoWA = 'autenticando';
