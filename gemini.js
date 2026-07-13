@@ -23,17 +23,19 @@ CLASIFICÁ cada tema relevante:
 - "accion": el dueño debe responder, confirmar, firmar, traer algo, decidir, autorizar, etc.
 - "pago": hay que pagar algo — cuota, actividad, servicio (incluí monto y fecha si se menciona)
 - "evento": algo en fecha específica — acto, reunión, excursión, partido (incluí fecha y hora)
-- "info": información útil pero sin acción requerida
+- "info": información útil sin acción requerida. Solo incluí info que realmente le sirva al dueño: cambios de horario, avisos oficiales, datos que necesita conocer. Opiniones, charla entre miembros y comentarios sueltos → OMITIR
 - "spam": cadenas virales, publicidad, memes, reenvíos sin contenido propio → OMITIR del resultado
 
 IGNORAR completamente: saludos, stickers, GIFs, audios de cortesía, comentarios de relleno
+
+FECHA LÍMITE: cuando un tema tiene fecha (vencimiento de pago, fecha de evento, deadline), completá "fecha_limite" en formato YYYY-MM-DD. Convertí fechas relativas ("mañana", "el viernes") usando la fecha de hoy que se indica abajo. Si no hay fecha, null.
 
 DETECTAR "me_piden": true cuando alguien le está pidiendo ALGO ESPECÍFICO al dueño del teléfono (responder, confirmar, enviar, decidir algo). false cuando es información general o una pregunta al grupo.
 
 Para grupos escolares prestá atención a: autorizaciones para firmar, pagos con fecha límite, actos/excursiones, comunicados de docentes.
 
 Respondé SOLO con JSON válido, sin texto extra:
-[{"tema":"<2-4 palabras>","resumen":"<qué pasa con datos concretos>","tipo":"<accion|pago|evento|info>","de":"<nombre del remitente>","me_piden":false,"accion":"<qué debe hacer el dueño exactamente, o null>","ids":[<id>,…]}]
+[{"tema":"<2-4 palabras>","resumen":"<qué pasa con datos concretos>","tipo":"<accion|pago|evento|info>","de":"<nombre del remitente>","me_piden":false,"accion":"<qué debe hacer el dueño exactamente, o null>","fecha_limite":"<YYYY-MM-DD o null>","ids":[<id>,…]}]
 Si todo es spam/saludos/irrelevante: []`;
 
 const PROMPT_INDIVIDUALES = `Analizás chats 1-a-1 de WhatsApp. Todos los mensajes que recibís son de la otra persona dirigidos al dueño del teléfono.
@@ -89,12 +91,16 @@ function buildPromptGrupos(chatNombre) {
   return base;
 }
 
+function fechaHoy() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' });
+}
+
 async function resumirBatchChat(mensajes, promptGrupos) {
   const lista = mensajes
     .map((m) => `ID ${m.id} | De: ${m.remitente ?? m.remitente_id}\nMensaje: ${m.cuerpo}`)
     .join('\n---\n');
 
-  const texto = await callGemini(`${promptGrupos}\n\nMensajes:\n${lista}`);
+  const texto = await callGemini(`${promptGrupos}\n\nFecha de hoy: ${fechaHoy()}\n\nMensajes:\n${lista}`);
   const match = texto.match(/\[[\s\S]*\]/);
   if (!match) throw new Error(`Respuesta inesperada: ${texto.slice(0, 200)}`);
   return JSON.parse(match[0]);
@@ -106,7 +112,7 @@ async function resumirBatchGrupos(mensajes) {
     .join('\n---\n');
 
   const promptGrupos = buildPromptGrupos(null);
-  const texto = await callGemini(`${promptGrupos}\n\nMensajes:\n${lista}`);
+  const texto = await callGemini(`${promptGrupos}\n\nFecha de hoy: ${fechaHoy()}\n\nMensajes:\n${lista}`);
   const match = texto.match(/\[[\s\S]*\]/);
   if (!match) throw new Error(`Respuesta inesperada: ${texto.slice(0, 200)}`);
   return JSON.parse(match[0]);
@@ -234,4 +240,25 @@ async function analizarIndividuales(mensajes, contactos = new Map()) {
   return { eventos, compromisos, pedidos, idsProcesados };
 }
 
-module.exports = { analizarMensajes, analizarChat, analizarIndividuales };
+/**
+ * Genera el "titular del día": una frase corta en tono de asistente personal
+ * que resume lo más importante de los pendientes. Si falla, devuelve '' y el
+ * digest sale sin titular (nunca rompe el envío).
+ */
+async function generarTitular(items) {
+  if (!items.length) return '';
+  const nombre = (config.nombre_dueno || '').trim() || 'el dueño';
+  const prompt = `Sos el asistente personal de ${nombre}. Estos son sus pendientes de hoy según sus mensajes de WhatsApp:
+${items.map((i) => `- ${i}`).join('\n')}
+
+Escribí UNA sola frase (máximo 25 palabras) que le resuma lo más importante, priorizando lo urgente. Tono cercano y directo, voseo argentino, sin saludo, sin emojis, sin comillas. Respondé solo la frase.`;
+  try {
+    const texto = await callGemini(prompt);
+    return texto.replace(/^["'\s]+|["'\s]+$/g, '').split('\n')[0].trim();
+  } catch (err) {
+    console.warn(`[Gemini] No se pudo generar titular:`, err.message);
+    return '';
+  }
+}
+
+module.exports = { analizarMensajes, analizarChat, analizarIndividuales, generarTitular };

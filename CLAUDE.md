@@ -1,7 +1,7 @@
 # Instrucciones para Claude Code
 
 ## Qué es este proyecto
-Bot de WhatsApp que monitorea mensajes, analiza con Gemini si son importantes, y manda **dos resúmenes (digests) por día — 11:00 y 21:00** al chat privado del dueño. Cada digest es un único mensaje consolidado con un bloque "📌 Para vos" (lo accionable, deduplicado) arriba y la info de grupos abajo. Los horarios se configuran en `config.json` → `resumen.horas_digest`.
+Bot de WhatsApp que monitorea mensajes, analiza con Gemini si son importantes, y manda **dos resúmenes (digests) por día — 11:00 y 21:00** al chat privado del dueño. Cada digest es un único mensaje consolidado en tono de asistente personal: saludo según la hora + titular del día (frase generada por Gemini), bloque "📌 Para resolver" (acciones y pagos ordenados por urgencia — YA VENCIÓ / HOY / MAÑANA primero, usando la `fecha_limite` que extrae Gemini), bloque "📅 Se viene" (eventos en orden cronológico con fecha legible) y "👥 De los grupos" (info útil, máx. 3 ítems por grupo). Si no hay nada relevante manda igual un mensaje corto "✅ Todo tranquilo", así el dueño sabe que el bot está vivo. Los horarios se configuran en `config.json` → `resumen.horas_digest`.
 
 ## Stack — no cambiar sin preguntar
 - Node.js (CommonJS, no ESModules)

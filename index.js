@@ -27,7 +27,7 @@ const {
   obtenerReportes,
 } = require('./db');
 const { iniciarCliente, enviarTextoLibre } = require('./whatsapp');
-const { analizarChat, analizarIndividuales } = require('./gemini');
+const { analizarChat, analizarIndividuales, generarTitular } = require('./gemini');
 const { recargar: recargarFiltros } = require('./filtros');
 
 let config = require('./config.json');
@@ -81,92 +81,168 @@ function normalizarClave(s) {
   return (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+const TZ = 'America/Argentina/Buenos_Aires';
+
+function hoyISO() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: TZ });
+}
+
+function horaActual() {
+  return Number(new Date().toLocaleString('en-US', { timeZone: TZ, hour: 'numeric', hour12: false }));
+}
+
+// Acepta "YYYY-MM-DD" o "YYYY-MM-DD HH:MM" (también con T). Devuelve {iso, hora} o null.
+function parseFecha(s) {
+  const m = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?/.exec(String(s || '').trim());
+  return m ? { iso: m[1], hora: m[2] || null } : null;
+}
+
+// "2026-07-15" → "mar 15/7" (+ hora si hay)
+function fechaLegible(f) {
+  if (!f) return '';
+  const d = new Date(`${f.iso}T12:00:00`);
+  if (isNaN(d)) return f.iso;
+  const dia = d.toLocaleDateString('es-AR', { weekday: 'short' }).replace(/[.,]/g, '');
+  const txt = `${dia} ${d.getDate()}/${d.getMonth() + 1}`;
+  return f.hora ? `${txt} ${f.hora}` : txt;
+}
+
+// Días desde hoy hasta la fecha (negativo = vencida). null si no hay fecha.
+function diasHasta(f) {
+  if (!f) return null;
+  const dias = Math.round((new Date(`${f.iso}T00:00:00Z`) - new Date(`${hoyISO()}T00:00:00Z`)) / 86400000);
+  return isNaN(dias) ? null : dias;
+}
+
+// Prefijo de urgencia y peso para ordenar (menor = más urgente).
+function urgencia(f) {
+  const dias = diasHasta(f);
+  if (dias === null) return { tag: '', peso: 50 };
+  if (dias < 0) return { tag: '⚠️ *YA VENCIÓ* — ', peso: 0 };
+  if (dias === 0) return { tag: '⚠️ *HOY* — ', peso: 1 };
+  if (dias === 1) return { tag: '*MAÑANA* — ', peso: 2 };
+  return { tag: '', peso: 2 + dias };
+}
+
 /**
- * Arma UN solo mensaje consolidado (digest):
- *  - Bloque "📌 Para vos": todo lo accionable (de grupos + individuales),
- *    deduplicado, dividido en acciones / pagos / fechas.
- *  - Bloque "👥 De los grupos (info)": el resto de contexto, por grupo.
- * Cada ítem indica su origen entre paréntesis para distinguir grupo vs persona.
+ * Junta todo lo accionable de grupos + individuales, deduplicado:
+ *  - pendientes: acciones y pagos, con fecha límite si Gemini la detectó
+ *  - agenda: eventos con fecha, para ordenar cronológicamente
  */
-function formatearDigest(resumenesChats, resIndiv, contactos, meta = {}) {
-  const { etiqueta, totalMensajes = 0, nGrupos = 0, nIndiv = 0 } = meta;
-  const fecha = new Date().toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' });
-  const hora = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-
-  const titulo = etiqueta ? `📋 *Resumen ${etiqueta} — ${fecha} ${hora}*` : `📋 *Resumen — ${fecha} ${hora}*`;
-  const out = [titulo, `_${totalMensajes} mensajes · ${nGrupos} grupos · ${nIndiv} individuales_`];
-
-  const acciones = [];
-  const pagos = [];
-  const fechas = [];
+function extraerAccionables(resumenesChats, resIndiv, contactos) {
+  const pendientes = []; // { emoji, texto, origen, fecha }
+  const agenda = [];     // { texto, origen, fecha, fechaRaw }
   const vistos = new Set();
-  const agregar = (arr, linea, clave) => {
+  const nuevo = (clave) => {
     const k = normalizarClave(clave);
-    if (k && vistos.has(k)) return;
+    if (k && vistos.has(k)) return false;
     if (k) vistos.add(k);
-    arr.push(linea);
+    return true;
   };
 
-  // Accionables desde grupos
   for (const { chatNombre, temas } of resumenesChats) {
     for (const t of temas) {
+      const fecha = parseFecha(t.fecha_limite);
       if (t.me_piden || t.tipo === 'accion') {
         const q = t.accion || t.resumen;
-        agregar(acciones, `🔴 ${q} _(${chatNombre}${t.de ? ` · ${t.de}` : ''})_`, `${t.tema}${q}`);
+        if (nuevo(`${t.tema}${q}`)) pendientes.push({ emoji: '🔴', texto: q, origen: `${chatNombre}${t.de ? ` · ${t.de}` : ''}`, fecha });
       } else if (t.tipo === 'pago') {
-        agregar(pagos, `💰 ${t.resumen} _(${chatNombre})_`, `${t.tema}${t.resumen}`);
+        if (nuevo(`${t.tema}${t.resumen}`)) pendientes.push({ emoji: '💰', texto: t.resumen, origen: chatNombre, fecha });
       } else if (t.tipo === 'evento') {
-        agregar(fechas, `📅 ${t.resumen} _(${chatNombre})_`, `${t.tema}${t.resumen}`);
+        if (nuevo(`${t.tema}${t.resumen}`)) agenda.push({ texto: t.resumen, origen: chatNombre, fecha, fechaRaw: t.fecha_limite });
       }
     }
   }
 
-  // Accionables desde individuales (todo pedido/compromiso/evento es para el dueño)
   (resIndiv.pedidos || []).forEach((p) => {
-    const nombre = resolverNombreIndiv(p.chat || p.de, contactos);
-    agregar(acciones, `🔴 ${p.pedido} _(${nombre})_`, `${p.de}${p.pedido}`);
+    if (!nuevo(`${p.de}${p.pedido}`)) return;
+    pendientes.push({ emoji: '🔴', texto: p.pedido, origen: resolverNombreIndiv(p.chat || p.de, contactos), fecha: null });
   });
   (resIndiv.compromisos || []).forEach((c) => {
-    const nombre = resolverNombreIndiv(c.chat, contactos);
-    agregar(acciones, `🔴 ${c.tema}: ${c.resumen} _(${nombre})_`, `${c.tema}${c.resumen}`);
+    if (!nuevo(`${c.tema}${c.resumen}`)) return;
+    pendientes.push({ emoji: '🔴', texto: `${c.tema}: ${c.resumen}`, origen: resolverNombreIndiv(c.chat, contactos), fecha: null });
   });
   (resIndiv.eventos || []).forEach((e) => {
-    const nombre = resolverNombreIndiv(e.chat, contactos);
-    agregar(fechas, `📅 ${e.fecha} — ${e.titulo} _(${nombre})_`, `${e.titulo}${e.fecha}`);
+    if (!nuevo(`${e.titulo}${e.fecha}`)) return;
+    agenda.push({ texto: e.titulo, origen: resolverNombreIndiv(e.chat, contactos), fecha: parseFecha(e.fecha), fechaRaw: e.fecha });
   });
 
+  return { pendientes, agenda };
+}
+
+/**
+ * Arma UN solo mensaje consolidado (digest) en tono de asistente personal:
+ *  - Saludo según la hora + titular del día (generado por Gemini)
+ *  - "📌 Para resolver": acciones y pagos ordenados por urgencia (HOY/MAÑANA primero)
+ *  - "📅 Se viene": eventos ordenados cronológicamente con fecha legible
+ *  - "👥 De los grupos": info útil, máximo 3 ítems por grupo para no hacer ruido
+ */
+function formatearDigest(accionables, resumenesChats, meta = {}) {
+  const { etiqueta, totalMensajes = 0, titular = '' } = meta;
+  const { pendientes, agenda } = accionables;
+
+  const nombre = (config.nombre_dueno || '').trim();
+  const h = horaActual();
+  const saludo = h < 13 ? '☀️ *Buen día' : h < 20 ? '🌤️ *Buenas tardes' : '🌙 *Buenas noches';
+  const diaSemana = new Date().toLocaleDateString('es-AR', { timeZone: TZ, weekday: 'long' });
+  const [, mm, dd] = hoyISO().split('-');
+  const fecha = `${diaSemana} ${Number(dd)}/${Number(mm)}`;
+  const hora = new Date().toLocaleTimeString('es-AR', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false });
+
+  const out = [`${saludo}${nombre ? `, ${nombre}` : ''}* — ${fecha} ${hora}${etiqueta ? ` · ${etiqueta}` : ''}`];
+  if (titular) out.push(`_${titular}_`);
+
   out.push('');
-  out.push('📌 *Para vos*');
-  if (acciones.length || pagos.length || fechas.length) {
-    acciones.forEach((l) => out.push(l));
-    pagos.forEach((l) => out.push(l));
-    fechas.forEach((l) => out.push(l));
+  out.push('📌 *Para resolver*');
+  if (pendientes.length) {
+    const ordenados = [...pendientes].sort((a, b) => urgencia(a.fecha).peso - urgencia(b.fecha).peso);
+    ordenados.forEach((p) => {
+      out.push(`${p.emoji} ${urgencia(p.fecha).tag}${p.texto} _(${p.origen})_`);
+    });
   } else {
-    out.push('_Nada que requiera acción._');
+    out.push('✅ Nada pendiente — no te piden nada por ahora.');
   }
 
-  // Info de grupos (temas tipo info que no entraron arriba)
+  if (agenda.length) {
+    const ordenada = [...agenda].sort((a, b) => {
+      const ka = a.fecha ? `${a.fecha.iso} ${a.fecha.hora || ''}` : '9999';
+      const kb = b.fecha ? `${b.fecha.iso} ${b.fecha.hora || ''}` : '9999';
+      return ka.localeCompare(kb);
+    });
+    out.push('');
+    out.push('📅 *Se viene*');
+    ordenada.forEach((e) => {
+      const cuando = e.fecha ? fechaLegible(e.fecha) : (e.fechaRaw || 's/f');
+      const dias = diasHasta(e.fecha);
+      const conHora = e.fecha?.hora ? ` ${e.fecha.hora}` : '';
+      const marca = dias === 0 ? `*HOY${conHora}*` : dias === 1 ? `*mañana${conHora}*` : `*${cuando}*`;
+      out.push(`• ${marca} — ${e.texto} _(${e.origen})_`);
+    });
+  }
+
+  // Info de grupos: solo lo útil, con tope por grupo para no inflar el mensaje
   const bloquesInfo = [];
   for (const { chatNombre, temas } of resumenesChats) {
-    const infos = temas.filter((t) => t.tipo === 'info' && !t.me_piden);
-    if (!infos.length) continue;
-    const lineas = [`📋 *${chatNombre}*`];
     const vistosInfo = new Set();
-    infos.forEach((t) => {
-      const k = normalizarClave(t.resumen);
-      if (k && vistosInfo.has(k)) return;
-      if (k) vistosInfo.add(k);
-      lineas.push(`  ℹ️ ${t.resumen}`);
-    });
-    if (lineas.length > 1) bloquesInfo.push(lineas.join('\n'));
+    const infos = temas
+      .filter((t) => t.tipo === 'info' && !t.me_piden)
+      .filter((t) => {
+        const k = normalizarClave(t.resumen);
+        if (k && vistosInfo.has(k)) return false;
+        if (k) vistosInfo.add(k);
+        return true;
+      })
+      .slice(0, 3);
+    infos.forEach((t) => bloquesInfo.push(`• *${chatNombre}:* ${t.resumen}`));
   }
   if (bloquesInfo.length) {
     out.push('');
-    out.push('━━━━━━━━━━');
-    out.push('👥 *De los grupos (info)*');
-    out.push('');
-    out.push(bloquesInfo.join('\n\n'));
+    out.push('👥 *De los grupos*');
+    bloquesInfo.forEach((l) => out.push(l));
   }
+
+  out.push('');
+  out.push(`_${totalMensajes} mensajes revisados_`);
 
   return out.join('\n').trim();
 }
@@ -543,8 +619,19 @@ async function analizarLote(todos, etiqueta) {
     }
   }
 
-  const meta = { etiqueta, totalMensajes: todos.length, nGrupos: porChat.size, nIndiv: individuales.length };
-  const texto = formatearDigest(resumenesChats, resIndiv, contactos, meta);
+  // Titular del día: una frase de Gemini con lo más importante de los pendientes
+  const accionables = extraerAccionables(resumenesChats, resIndiv, contactos);
+  let titular = '';
+  const itemsTitular = [
+    ...accionables.pendientes.map((p) => `${p.texto} (${p.origen}${p.fecha ? `, fecha ${p.fecha.iso}` : ''})`),
+    ...accionables.agenda.map((e) => `${e.texto} (${e.origen}, ${e.fechaRaw || 'sin fecha'})`),
+  ];
+  if (itemsTitular.length) {
+    titular = await generarTitular(itemsTitular);
+  }
+
+  const meta = { etiqueta, totalMensajes: todos.length, titular };
+  const texto = formatearDigest(accionables, resumenesChats, meta);
   const totalTemas = resumenesChats.reduce((a, r) => a + r.temas.length, 0)
     + (resIndiv.eventos?.length || 0) + (resIndiv.compromisos?.length || 0) + (resIndiv.pedidos?.length || 0);
 
@@ -588,11 +675,24 @@ async function generarDigest(etiqueta) {
   try {
     const todos = await obtenerMensajesSinProcesar();
     if (!todos.length) {
-      console.log(`[Digest] Sin mensajes pendientes — nada que enviar`);
+      // Mensaje corto igual: el dueño sabe que el bot está vivo y no se perdió nada
+      console.log(`[Digest] Sin mensajes pendientes — enviando "todo tranquilo"`);
+      const txt = `✅ *Todo tranquilo* — no hubo mensajes nuevos desde el último resumen.`;
+      try {
+        const ok = await enviarTextoLibre(txt);
+        if (ok) await guardarReporte('digest', txt, 0, 0);
+      } catch (err) {
+        console.error(`[Digest] No se pudo enviar (WA no conectado):`, err.message);
+      }
       return;
     }
 
-    const { texto, idsProcesados, totalTemas } = await analizarLote(todos, etiqueta);
+    let { texto, idsProcesados, totalTemas } = await analizarLote(todos, etiqueta);
+
+    // Hubo mensajes pero nada relevante: mensaje corto en vez del esqueleto del digest
+    if (totalTemas === 0) {
+      texto = `✅ *Todo tranquilo* — revisé ${todos.length} mensajes y no hay nada pendiente para vos. Solo charla.`;
+    }
 
     let enviado = false;
     try {
