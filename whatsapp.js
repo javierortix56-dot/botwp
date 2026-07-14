@@ -13,6 +13,13 @@ const logger = pino({ level: 'silent' });
 
 let sock;
 let listo = false;
+// Modo ahorro de notificaciones: cuando el bot se desconecta a propósito
+// (entre digests), este flag evita que el handler de 'close' reintente.
+let desconexionVoluntaria = false;
+let callbacksGuardados = {};
+// Timestamp del último lote de mensajes recibido — lo usa esperarSincronizacion()
+// para saber cuándo terminó de bajar la cola offline tras reconectar.
+let ultimaActividadMensajes = 0;
 
 function normalizarJid(jid) {
   if (!jid) return jid;
@@ -33,6 +40,8 @@ function extraerCuerpo(message) {
 }
 
 async function iniciarCliente(callbacks = {}) {
+  callbacksGuardados = callbacks;
+  desconexionVoluntaria = false;
   const { state, saveCreds } = await useTursoAuthState();
   const { version } = await fetchLatestBaileysVersion();
   console.log(`[WA] Usando WhatsApp Web v${version.join('.')}`);
@@ -47,8 +56,9 @@ async function iniciarCliente(callbacks = {}) {
     // device es un desktop ocioso en vez de un navegador activo.
     browser: ['Mac OS', 'Safari', '15.0'],
     // syncFullHistory:false hace que el bot parezca un cliente "pasivo" para WA,
-    // reduciendo aún más la supresión de notificaciones. Costo: si el bot se cae
-    // y reconecta, no rellena historial — pero en Render corre 24/7.
+    // reduciendo aún más la supresión de notificaciones. Los mensajes que llegan
+    // mientras el bot está desconectado (modo ahorro) los entrega WhatsApp igual
+    // al reconectar, como 'append' — no dependemos del history sync completo.
     syncFullHistory: false,
     markOnlineOnConnect: false,
   });
@@ -75,6 +85,7 @@ async function iniciarCliente(callbacks = {}) {
   // Backfill: cuando WhatsApp sincroniza historial, guardamos mensajes recientes
   // de chats individuales para el resumen diario. También extraemos contactos.
   sock.ev.on('messaging-history.set', async ({ messages, contacts }) => {
+    ultimaActividadMensajes = Date.now();
     if (contacts?.length) await procesarContactos(contacts);
     if (!messages?.length) return;
     const dias = config.dias_historial ?? 15;
@@ -131,12 +142,21 @@ async function iniciarCliente(callbacks = {}) {
 
     if (connection === 'open') {
       listo = true;
-      console.log(`[WA] Cliente listo — escuchando mensajes`);
+      ultimaActividadMensajes = Date.now();
+      // Presencia "unavailable": le dice a WhatsApp que este dispositivo está
+      // inactivo, así las push siguen llegando al teléfono aunque el bot esté conectado.
+      try { await sock.sendPresenceUpdate('unavailable'); } catch {}
+      console.log(`[WA] Cliente listo — escuchando mensajes (presencia: unavailable)`);
       if (callbacks.onListo) callbacks.onListo();
     }
 
     if (connection === 'close') {
       listo = false;
+      if (desconexionVoluntaria) {
+        console.log(`[WA] Desconexión voluntaria (modo ahorro) — el teléfono queda como único dispositivo activo`);
+        if (callbacks.onStandby) callbacks.onStandby();
+        return;
+      }
       const code = lastDisconnect?.error?.output?.statusCode;
       const motivo = lastDisconnect?.error?.message ?? 'desconocido';
       console.warn(`[WA] Desconectado (${code}): ${motivo}`);
@@ -174,6 +194,7 @@ async function iniciarCliente(callbacks = {}) {
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    ultimaActividadMensajes = Date.now();
     // 'notify' = mensajes en vivo. 'append' = mensajes que WhatsApp entrega al
     // reconectar — típicamente los que llegaron mientras el bot estaba caído por
     // un redeploy/reinicio de Render. Capturamos ambos para cerrar esas ventanas
@@ -321,6 +342,9 @@ async function enviarTextoLibre(texto) {
   }
   try {
     await sock.sendMessage(destino, { text: texto });
+    // Re-marcar unavailable: enviar un mensaje puede hacer que WhatsApp considere
+    // "activo" a este dispositivo y suprima las push del teléfono.
+    try { await sock.sendPresenceUpdate('unavailable'); } catch {}
     console.log(`[WA] Texto enviado a ${destino}`);
     return true;
   } catch (err) {
@@ -329,4 +353,64 @@ async function enviarTextoLibre(texto) {
   }
 }
 
-module.exports = { iniciarCliente, enviarResumen, enviarTextoLibre };
+function estaConectado() {
+  return listo;
+}
+
+/**
+ * Conecta bajo demanda (modo ahorro): si ya está conectado no hace nada;
+ * si está desconectado a propósito, re-inicia el cliente y espera el 'open'.
+ */
+async function conectarBajoDemanda(timeoutMs = 60000) {
+  if (listo) return;
+  if (!sock || desconexionVoluntaria) {
+    await iniciarCliente(callbacksGuardados);
+  }
+  const inicio = Date.now();
+  while (!listo) {
+    if (Date.now() - inicio > timeoutMs) {
+      throw new Error(`Timeout (${timeoutMs / 1000}s) esperando conexión con WhatsApp`);
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+/**
+ * Cierra el socket a propósito (modo ahorro de notificaciones). El handler de
+ * 'close' detecta el flag y NO reintenta: el teléfono queda como único
+ * dispositivo activo y recibe todas las push. Los mensajes que lleguen
+ * mientras tanto se recuperan al reconectar (los entrega WhatsApp como 'append').
+ */
+async function desconectar() {
+  if (!sock) return;
+  desconexionVoluntaria = true;
+  listo = false;
+  try {
+    sock.end(undefined);
+  } catch (err) {
+    console.error(`[WA] Error cerrando socket:`, err.message);
+  }
+}
+
+/**
+ * Espera a que termine de bajar la cola de mensajes offline tras conectar:
+ * resuelve cuando pasan quietMs sin recibir mensajes nuevos, con tope maxMs.
+ */
+async function esperarSincronizacion(quietMs = 15000, maxMs = 90000) {
+  const inicio = Date.now();
+  while (Date.now() - inicio < maxMs) {
+    if (Date.now() - ultimaActividadMensajes >= quietMs) return;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  console.warn(`[WA] esperarSincronizacion: tope de ${maxMs / 1000}s alcanzado — sigo con lo que haya`);
+}
+
+module.exports = {
+  iniciarCliente,
+  enviarResumen,
+  enviarTextoLibre,
+  estaConectado,
+  conectarBajoDemanda,
+  desconectar,
+  esperarSincronizacion,
+};
