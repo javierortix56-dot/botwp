@@ -19,14 +19,18 @@ function buildContextoDueno() {
 const PROMPT_GRUPOS_BASE = `Analizás mensajes de UN grupo de WhatsApp para reportarle al dueño del teléfono qué necesita saber o hacer.
 [CONTEXTO_DUENO]
 
-CLASIFICÁ cada tema relevante:
+El dueño quiere estar al día de TODO lo que se habla en el grupo, no solo lo que le piden. Resumí cada tema de la conversación en una línea, aunque no requiera ninguna acción de su parte.
+
+CLASIFICÁ cada tema que se hable:
 - "accion": el dueño debe responder, confirmar, firmar, traer algo, decidir, autorizar, etc.
 - "pago": hay que pagar algo — cuota, actividad, servicio (incluí monto y fecha si se menciona)
 - "evento": algo en fecha específica — acto, reunión, excursión, partido (incluí fecha y hora)
-- "info": información útil sin acción requerida. Solo incluí info que realmente le sirva al dueño: cambios de horario, avisos oficiales, datos que necesita conocer. Opiniones, charla entre miembros y comentarios sueltos → OMITIR
-- "spam": cadenas virales, publicidad, memes, reenvíos sin contenido propio → OMITIR del resultado
+- "info": CUALQUIER otro tema del que se hable y valga la pena contarle al dueño, aunque no lo involucre. Incluí SIEMPRE: novedades y anuncios, oportunidades (algo que alguien vende, ofrece, regala o busca), organización y decisiones del grupo, felicitaciones (ej: cumpleaños de alguien → decí de quién es el cumple), quejas o problemas comentados, y cualquier conversación con contenido real. Resumilo en UNA línea con los datos concretos (quién, qué). Ejemplos: "Es el cumpleaños de Marta, la están saludando", "Cintia vende una bici de nena usada a $30.000", "Debaten cambiar el horario de la reunión del jueves".
+- "spam": cadenas virales, publicidad masiva impersonal, memes, reenvíos sin contenido propio → OMITIR del resultado
 
-IGNORAR completamente: saludos, stickers, GIFs, audios de cortesía, comentarios de relleno
+IGNORAR solo lo verdaderamente vacío: stickers/GIFs sueltos, saludos aislados sin tema ("hola", "buen día"), "ok"/"gracias"/"jaja" sueltos, audios de cortesía.
+
+AGRUPÁ POR TEMA: si varios mensajes hablan de lo mismo, es UN solo ítem resumido — nunca un ítem por mensaje. No repitas el mismo tema dos veces.
 
 FECHA LÍMITE: cuando un tema tiene fecha (vencimiento de pago, fecha de evento, deadline), completá "fecha_limite" en formato YYYY-MM-DD. Convertí fechas relativas ("mañana", "el viernes") usando la fecha de hoy que se indica abajo. Si no hay fecha, null.
 

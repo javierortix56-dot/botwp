@@ -237,8 +237,11 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
     });
   }
 
-  // Info de grupos: solo lo útil, con tope por grupo para no inflar el mensaje
-  const bloquesInfo = [];
+  // De qué se habló: resumen de TODOS los temas de cada grupo (aunque no sean
+  // para el dueño), un renglón por tema, agrupados bajo el nombre del grupo.
+  // Tope configurable por grupo para no inflar el mensaje si un grupo explotó.
+  const maxTemasGrupo = config.resumen?.max_temas_grupo ?? 8;
+  const bloquesGrupo = [];
   for (const { chatNombre, temas } of resumenesChats) {
     const vistosInfo = new Set();
     const infos = temas
@@ -248,14 +251,21 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
         if (k && vistosInfo.has(k)) return false;
         if (k) vistosInfo.add(k);
         return true;
-      })
-      .slice(0, 3);
-    infos.forEach((t) => bloquesInfo.push(`• *${chatNombre}:* ${t.resumen}`));
+      });
+    if (!infos.length) continue;
+    const mostrados = infos.slice(0, maxTemasGrupo);
+    const lineas = [`*${chatNombre}*`];
+    mostrados.forEach((t) => lineas.push(`• ${t.resumen}`));
+    if (infos.length > maxTemasGrupo) {
+      lineas.push(`_…y ${infos.length - maxTemasGrupo} tema(s) más_`);
+    }
+    bloquesGrupo.push(lineas.join('\n'));
   }
-  if (bloquesInfo.length) {
+  if (bloquesGrupo.length) {
     out.push('');
-    out.push('👥 *De los grupos*');
-    bloquesInfo.forEach((l) => out.push(l));
+    out.push('💬 *De qué se habló*');
+    out.push('');
+    out.push(bloquesGrupo.join('\n\n'));
   }
 
   out.push('');

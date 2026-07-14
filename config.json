@@ -15,7 +15,8 @@
   "max_mensajes_por_batch": 25,
   "resumen": {
     "horas_digest": ["0 11 * * *", "0 21 * * *"],
-    "max_mensajes_por_batch": 25
+    "max_mensajes_por_batch": 25,
+    "max_temas_grupo": 8
   },
   "conexion": {
     "modo_ahorro_notificaciones": true,
