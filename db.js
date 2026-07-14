@@ -4,13 +4,54 @@ require('dotenv').config();
 
 let db;
 
+/**
+ * Detecta errores de Turso que valen la pena reintentar: caídas transitorias
+ * del servidor (5xx), cortes de stream, timeouts y fallos de red. Un 502/503
+ * casi siempre es un hipo momentáneo de Turso — no un problema de datos.
+ */
+function esErrorTransitorio(err) {
+  const msg = err?.message || '';
+  const status = err?.cause?.status ?? err?.status;
+  return (
+    [500, 502, 503, 504].includes(Number(status)) ||
+    /\b50[0234]\b/.test(msg) ||
+    /SERVER_ERROR|stream|timed? ?out|ECONN|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed|network/i.test(msg)
+  );
+}
+
+/**
+ * Ejecuta una operación contra Turso reintentando ante errores transitorios,
+ * con backoff exponencial (1s, 2s, 4s, 8s). Si el error no es transitorio, o se
+ * agotan los intentos, re-lanza. Los errores "de datos" no se reintentan.
+ */
+async function conReintentoTurso(fn, etiqueta = 'Turso', intentos = 4) {
+  let ultimoError;
+  for (let i = 1; i <= intentos; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      ultimoError = err;
+      if (!esErrorTransitorio(err) || i === intentos) throw err;
+      const espera = Math.min(1000 * 2 ** (i - 1), 8000);
+      console.warn(`[DB] ${etiqueta}: error transitorio (intento ${i}/${intentos}), reintento en ${espera / 1000}s — ${err.message}`);
+      await new Promise((r) => setTimeout(r, espera));
+    }
+  }
+  throw ultimoError;
+}
+
+/** Wrapper de db.execute con reintentos ante hipos de Turso. */
+function dbExecute(params, etiqueta = 'execute') {
+  return conReintentoTurso(() => db.execute(params), etiqueta);
+}
+
 async function conectar() {
   db = createClient({
     url: process.env.TURSO_URL,
     authToken: process.env.TURSO_TOKEN,
   });
 
-  await db.executeMultiple(`
+  await conReintentoTurso(() => db.executeMultiple(`
     CREATE TABLE IF NOT EXISTS mensajes (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
       chat_id     TEXT    NOT NULL,
@@ -50,23 +91,23 @@ async function conectar() {
       n_temas     INTEGER DEFAULT 0,
       creado_en   INTEGER DEFAULT (unixepoch())
     );
-  `);
+  `), 'schema');
 
   // Crear índice único para deduplicación. Si ya hay duplicados de antes
   // del fix, borramos los repetidos (conservando el de menor id) y luego
   // creamos el índice. Idempotente: si el índice ya existe, no hace nada.
   try {
-    await db.execute(`
+    await dbExecute(`
       DELETE FROM mensajes
       WHERE id NOT IN (
         SELECT MIN(id) FROM mensajes
         GROUP BY chat_id, COALESCE(remitente_id, ''), timestamp, cuerpo
       )
-    `);
-    await db.execute(`
+    `, 'dedup-delete');
+    await dbExecute(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_mensajes_dedup
         ON mensajes (chat_id, remitente_id, timestamp, cuerpo)
-    `);
+    `, 'dedup-index');
   } catch (err) {
     console.warn(`[DB] No se pudo crear índice de deduplicación:`, err.message);
   }
@@ -76,11 +117,11 @@ async function conectar() {
 
 async function guardarMensaje({ chatId, chatNombre, remitente, remitenteId, cuerpo, timestamp, esVip, tieneKeyword }) {
   try {
-    const result = await db.execute({
+    const result = await dbExecute({
       sql: `INSERT OR IGNORE INTO mensajes (chat_id, chat_nombre, remitente, remitente_id, cuerpo, timestamp, es_vip, tiene_keyword)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [chatId, chatNombre ?? null, remitente ?? null, remitenteId ?? null, cuerpo, timestamp, esVip ? 1 : 0, tieneKeyword ? 1 : 0],
-    });
+    }, 'guardarMensaje');
     return result.rowsAffected > 0;
   } catch (err) {
     console.error(`[DB] Error al guardar mensaje de ${chatId}:`, err.message);
@@ -264,24 +305,24 @@ async function obtenerReportes(limite = 20) {
 // Permite que la sesión sobreviva reinicios del contenedor sin re-escanear QR.
 async function useTursoAuthState() {
   const writeData = async (key, value) => {
-    await db.execute({
+    await dbExecute({
       sql: `INSERT INTO wa_auth (key, value, updated_at) VALUES (?, ?, unixepoch())
             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()`,
       args: [key, JSON.stringify(value, BufferJSON.replacer)],
-    });
+    }, `writeData ${key}`);
   };
 
   const readData = async (key) => {
-    const result = await db.execute({
+    const result = await dbExecute({
       sql: `SELECT value FROM wa_auth WHERE key = ?`,
       args: [key],
-    });
+    }, `readData ${key}`);
     if (!result.rows[0]) return null;
     return JSON.parse(result.rows[0].value, BufferJSON.reviver);
   };
 
   const removeData = async (key) => {
-    await db.execute({ sql: `DELETE FROM wa_auth WHERE key = ?`, args: [key] });
+    await dbExecute({ sql: `DELETE FROM wa_auth WHERE key = ?`, args: [key] }, `removeData ${key}`);
   };
 
   const creds = (await readData('creds')) || initAuthCreds();
@@ -292,13 +333,19 @@ async function useTursoAuthState() {
       keys: {
         get: async (type, ids) => {
           const data = {};
-          await Promise.all(ids.map(async (id) => {
-            let value = await readData(`${type}-${id}`);
-            if (value && type === 'app-state-sync-key') {
-              value = proto.Message.AppStateSyncKeyData.fromObject(value);
-            }
-            if (value) data[id] = value;
-          }));
+          try {
+            await Promise.all(ids.map(async (id) => {
+              let value = await readData(`${type}-${id}`);
+              if (value && type === 'app-state-sync-key') {
+                value = proto.Message.AppStateSyncKeyData.fromObject(value);
+              }
+              if (value) data[id] = value;
+            }));
+          } catch (err) {
+            // Nunca dejar que un hipo de Turso propague desde un handler de
+            // Baileys y crashee el proceso. Devolvemos lo que se pudo leer.
+            console.error(`[DB] Error leyendo keys (${type}):`, err.message);
+          }
           return data;
         },
         set: async (data) => {
@@ -310,12 +357,23 @@ async function useTursoAuthState() {
               tasks.push(value ? writeData(key, value) : removeData(key));
             }
           }
-          await Promise.all(tasks);
+          try {
+            await Promise.all(tasks);
+          } catch (err) {
+            console.error(`[DB] Error guardando keys (se reintentará en el próximo update):`, err.message);
+          }
         },
       },
     },
+    // saveCreds jamás debe tirar: se dispara desde el evento 'creds.update' de
+    // Baileys, y una excepción sin capturar ahí mataba el proceso entero cuando
+    // Turso devolvía 502. Si falla, se logea y se reintenta en el próximo update.
     saveCreds: async () => {
-      await writeData('creds', creds);
+      try {
+        await writeData('creds', creds);
+      } catch (err) {
+        console.error(`[DB] No se pudieron guardar creds (se reintentará en el próximo update):`, err.message);
+      }
     },
   };
 }

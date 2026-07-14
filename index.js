@@ -9,6 +9,16 @@ if (missing.length) {
   process.exit(1);
 }
 
+// Red de seguridad: un error transitorio (ej. un 502 de Turso en un handler
+// async de Baileys) NO debe tumbar el proceso. Preferimos un bot vivo que
+// logea y sigue, antes que un crash-loop que deja de mandar digests.
+process.on('unhandledRejection', (reason) => {
+  console.error(`[Bot] unhandledRejection (no fatal):`, reason?.message || reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error(`[Bot] uncaughtException (no fatal):`, err?.message || err);
+});
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -800,12 +810,22 @@ async function procesarMensajes() {
 async function main() {
   console.log(`[Bot] Arrancando...`);
   iniciarServidor();
-  try {
-    await conectar();
-  } catch (err) {
-    console.error(`[Bot] No se pudo conectar a Turso:`, err.message);
-    estadoWA = 'error_db';
-    return;
+  // Conectar a Turso con reintentos indefinidos: si la base está teniendo un
+  // hipo (502/503) al arrancar, NO nos rendimos ni dejamos el bot inerte —
+  // seguimos intentando con backoff hasta que Turso vuelva. Antes, un solo
+  // fallo acá dejaba el proceso vivo pero sin WhatsApp ni cron para siempre.
+  let intentoDB = 0;
+  for (;;) {
+    try {
+      await conectar();
+      break;
+    } catch (err) {
+      intentoDB++;
+      estadoWA = 'error_db';
+      const espera = Math.min(5000 * intentoDB, 60000);
+      console.error(`[Bot] No se pudo conectar a Turso (intento ${intentoDB}): ${err.message} — reintento en ${espera / 1000}s`);
+      await new Promise((r) => setTimeout(r, espera));
+    }
   }
   try {
     await iniciarCliente({
