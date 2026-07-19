@@ -21,6 +21,20 @@ let callbacksGuardados = {};
 // para saber cuándo terminó de bajar la cola offline tras reconectar.
 let ultimaActividadMensajes = 0;
 
+// Últimos mensajes salientes (id → contenido proto). Cuando el teléfono no puede
+// descifrar un digest ("Esperando el mensaje...") pide un reintento, y Baileys
+// necesita getMessage() para reenviarlo — sin esto el mensaje queda ilegible
+// para siempre en el teléfono.
+const mensajesEnviados = new Map();
+
+function recordarMensajeEnviado(msg) {
+  if (!msg?.key?.id || !msg.message) return;
+  mensajesEnviados.set(msg.key.id, msg.message);
+  if (mensajesEnviados.size > 100) {
+    mensajesEnviados.delete(mensajesEnviados.keys().next().value);
+  }
+}
+
 function normalizarJid(jid) {
   if (!jid) return jid;
   // whatsapp-web.js usa @c.us, Baileys usa @s.whatsapp.net
@@ -61,6 +75,9 @@ async function iniciarCliente(callbacks = {}) {
     // al reconectar, como 'append' — no dependemos del history sync completo.
     syncFullHistory: false,
     markOnlineOnConnect: false,
+    // Servir reintentos de descifrado: si el teléfono no pudo leer un mensaje
+    // nuestro, lo reenviamos desde este cache en vez de dejarlo "Esperando...".
+    getMessage: async (key) => mensajesEnviados.get(key?.id),
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -206,10 +223,18 @@ async function iniciarCliente(callbacks = {}) {
     const limiteTimestamp = Math.floor(Date.now() / 1000) - dias * 86400;
     const metaCache = new Map(); // evita pedir groupMetadata por cada mensaje en una ráfaga
     let recuperados = 0;
+    let sinContenido = 0;
 
     for (const msg of messages) {
       try {
-        if (msg.key.fromMe || !msg.message) continue;
+        if (msg.key.fromMe) continue;
+        if (!msg.message) {
+          // Mensaje sin contenido: casi siempre es un fallo de descifrado
+          // (sesión Signal corrupta) o un stub de sistema. Antes se descartaba
+          // en silencio y el digest salía "todo tranquilo" sin explicación.
+          sinContenido++;
+          continue;
+        }
 
         const cuerpo = extraerCuerpo(msg.message);
         if (!cuerpo) continue;
@@ -259,6 +284,9 @@ async function iniciarCliente(callbacks = {}) {
 
     if (type === 'append' && recuperados > 0) {
       console.log(`[WA] Catch-up al reconectar: ${recuperados} mensajes recuperados (duplicados ignorados)`);
+    }
+    if (sinContenido > 0) {
+      console.warn(`[WA] ⚠️ ${sinContenido} mensaje(s) llegaron sin contenido descifrable (${type}). Si esto se repite en cada conexión, la sesión está corrupta: usar /limpiar-sesion y re-escanear el QR.`);
     }
   });
 
@@ -326,7 +354,8 @@ async function enviarResumen(mensajes, temas) {
   }
 
   try {
-    await sock.sendMessage(destino, { text: texto });
+    const enviado = await sock.sendMessage(destino, { text: texto });
+    recordarMensajeEnviado(enviado);
     console.log(`[WA] Resumen enviado a ${destino} — ${temas.length} temas`);
   } catch (err) {
     console.error(`[WA] Error enviando resumen:`, err.message);
@@ -341,7 +370,8 @@ async function enviarTextoLibre(texto) {
     await new Promise((r) => setTimeout(r, 1000));
   }
   try {
-    await sock.sendMessage(destino, { text: texto });
+    const enviado = await sock.sendMessage(destino, { text: texto });
+    recordarMensajeEnviado(enviado);
     // Re-marcar unavailable: enviar un mensaje puede hacer que WhatsApp considere
     // "activo" a este dispositivo y suprima las push del teléfono.
     try { await sock.sendPresenceUpdate('unavailable'); } catch {}
