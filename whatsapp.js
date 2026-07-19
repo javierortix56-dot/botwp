@@ -99,15 +99,30 @@ async function iniciarCliente(callbacks = {}) {
   sock.ev.on('contacts.upsert', procesarContactos);
   sock.ev.on('contacts.update', procesarContactos);
 
-  // Backfill: cuando WhatsApp sincroniza historial, guardamos mensajes recientes
-  // de chats individuales para el resumen diario. También extraemos contactos.
-  sock.ev.on('messaging-history.set', async ({ messages, contacts }) => {
+  // Backfill: cuando WhatsApp sincroniza historial (incluye chats archivados),
+  // guardamos los mensajes recientes para el digest. También extraemos contactos.
+  sock.ev.on('messaging-history.set', async ({ chats, messages, contacts }) => {
     ultimaActividadMensajes = Date.now();
     if (contacts?.length) await procesarContactos(contacts);
-    if (!messages?.length) return;
+
+    // El history sync trae la lista de chats con su nombre real (el subject del
+    // grupo, no el pushName del remitente). Antes se guardaba el pushName como
+    // chatNombre y el filtro de grupos monitoreados NUNCA matcheaba → todos los
+    // mensajes grupales del historial (archivados incluidos) se descartaban.
+    const nombresChats = new Map();
+    for (const c of chats || []) {
+      if (c.id && c.name) nombresChats.set(c.id, c.name);
+    }
+
+    if (!messages?.length) {
+      if (nombresChats.size) console.log(`[WA] History sync: ${nombresChats.size} chats, sin mensajes en este lote`);
+      return;
+    }
     const dias = config.dias_historial ?? 15;
     const limiteTimestamp = Math.floor(Date.now() / 1000) - dias * 86400;
+    const metaCache = new Map(); // grupos sin nombre en el sync → una sola consulta de metadata
     let guardados = 0;
+    let filtrados = 0;
     for (const msg of messages) {
       try {
         if (msg.key.fromMe || !msg.message) continue;
@@ -121,16 +136,32 @@ async function iniciarCliente(callbacks = {}) {
         const remitenteId = msg.key.participant || chatId;
         const remitente = msg.pushName ?? null;
 
+        let chatNombre = nombresChats.get(chatId) || null;
+        if (!chatNombre && chatId.endsWith('@g.us')) {
+          if (metaCache.has(chatId)) {
+            chatNombre = metaCache.get(chatId);
+          } else {
+            try {
+              const meta = await sock.groupMetadata(chatId);
+              chatNombre = meta.subject;
+            } catch {
+              chatNombre = null;
+            }
+            metaCache.set(chatId, chatNombre);
+          }
+        }
+        if (!chatNombre && !chatId.endsWith('@g.us')) chatNombre = remitente;
+
         const msgData = {
           chatId,
-          chatNombre: remitente,
+          chatNombre,
           remitente,
           remitenteId,
           cuerpo,
           timestamp: ts,
         };
 
-        if (!debeAnalizarse(msgData)) continue;
+        if (!debeAnalizarse(msgData)) { filtrados++; continue; }
 
         const { esVip, tieneKeyword } = obtenerFlags(msgData);
         const insertado = await guardarMensaje({ ...msgData, esVip, tieneKeyword });
@@ -139,9 +170,7 @@ async function iniciarCliente(callbacks = {}) {
         console.error(`[WA] Error en backfill:`, err.message);
       }
     }
-    if (guardados > 0) {
-      console.log(`[WA] Backfill: ${guardados} mensajes nuevos guardados (últimos ${dias} días, duplicados ignorados)`);
-    }
+    console.log(`[WA] History sync: ${messages.length} mensajes recibidos, ${guardados} guardados, ${filtrados} fuera de los chats monitoreados (ventana ${dias} días)`);
   });
 
   sock.ev.on('connection.update', async (update) => {
