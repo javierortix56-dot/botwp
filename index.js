@@ -65,7 +65,10 @@ function recargarConfig() {
 }
 
 function postNtfy(title, body) {
-  if (!process.env.NTFY_TOPIC) return;
+  if (!process.env.NTFY_TOPIC) {
+    console.warn(`[ntfy] NTFY_TOPIC no configurado — notificación "${title}" omitida`);
+    return;
+  }
   const buf = Buffer.from(body);
   const req = https.request({
     hostname: 'ntfy.sh',
@@ -77,6 +80,13 @@ function postNtfy(title, body) {
       'Content-Type': 'text/plain',
       'Content-Length': buf.length,
     },
+  }, (res) => {
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      console.log(`[ntfy] Notificación "${title}" enviada (${res.statusCode})`);
+    } else {
+      console.error(`[ntfy] ntfy.sh respondió ${res.statusCode} para "${title}"`);
+    }
+    res.resume();
   });
   req.on('error', (err) => console.error(`[ntfy] Error:`, err.message));
   req.write(buf);
@@ -738,7 +748,9 @@ async function resumenPeriodo(horas) {
       const todos = await obtenerMensajesDesde(desde);
       if (!todos.length) {
         console.log(`[Resumen ${labelHoras}] Sin mensajes en el período`);
-        try { await enviarTextoLibre(`📋 *Resumen últimas ${labelHoras}*\n\nNo hay mensajes en este período.`); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message); }
+        const txt = `📋 *Resumen últimas ${labelHoras}*\n\nNo hay mensajes en este período.`;
+        postNtfy(`Resumen ${labelHoras}`, txt.replace(/\*/g, ''));
+        try { await enviarTextoLibre(txt); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message); }
         return;
       }
 
@@ -772,6 +784,9 @@ async function generarDigest(etiqueta) {
         // Mensaje corto igual: el dueño sabe que el bot está vivo y no se perdió nada
         console.log(`[Digest] Sin mensajes pendientes — enviando "todo tranquilo"`);
         const txt = `✅ *Todo tranquilo* — no hubo mensajes nuevos desde el último resumen.`;
+        // ntfy SIEMPRE, aunque no haya nada: antes este camino hacía return sin
+        // notificar y ntfy quedaba mudo justo cuando WA fallaba en descifrar.
+        postNtfy(`Resumen ${etiqueta || ''}`.trim() || 'Resumen', txt.replace(/\*/g, ''));
         try {
           const ok = await enviarTextoLibre(txt);
           if (ok) await guardarReporte('digest', txt, 0, 0);
