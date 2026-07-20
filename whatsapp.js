@@ -4,7 +4,7 @@ const {
   fetchLatestBaileysVersion,
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const { guardarMensaje, useTursoAuthState, limpiarAuth, guardarContacto } = require('./db');
+const { guardarMensaje, useTursoAuthState, limpiarAuth, guardarContacto, obtenerNombreChatConocido } = require('./db');
 const { debeAnalizarse, obtenerFlags } = require('./filtros');
 const config = require('./config.json');
 require('dotenv').config();
@@ -33,6 +33,50 @@ function recordarMensajeEnviado(msg) {
   if (mensajesEnviados.size > 100) {
     mensajesEnviados.delete(mensajesEnviados.keys().next().value);
   }
+}
+
+// Mapa chatId → subject de TODOS los grupos donde participa el dueño.
+// groupFetchAllParticipating incluye también los grupos ARCHIVADOS, que no
+// siempre vienen en el history sync ni tienen metadata cacheada. Persiste
+// entre reconexiones (modo ahorro) para no depender de groupMetadata en
+// plena ráfaga de mensajes offline.
+const nombresGrupos = new Map();
+
+async function cargarNombresGrupos() {
+  try {
+    const grupos = await sock.groupFetchAllParticipating();
+    for (const [jid, g] of Object.entries(grupos)) {
+      if (g?.subject) nombresGrupos.set(jid, g.subject);
+    }
+    console.log(`[WA] Nombres de ${Object.keys(grupos).length} grupos precargados (incluye archivados)`);
+  } catch (err) {
+    console.warn(`[WA] No se pudieron precargar nombres de grupos:`, err.message);
+  }
+}
+
+/**
+ * Resuelve el nombre (subject) de un grupo con varios fallbacks:
+ * precarga → cache de la ráfaga → groupMetadata → último nombre en la DB.
+ * NUNCA cachea un fallo: antes, un solo error de groupMetadata (típico recién
+ * reconectado, y habitual en grupos archivados) guardaba null para toda la
+ * ráfaga y el filtro descartaba en silencio todos los mensajes de ese grupo.
+ */
+async function nombreDeGrupo(chatId, metaCache) {
+  if (nombresGrupos.has(chatId)) return nombresGrupos.get(chatId);
+  if (metaCache.has(chatId)) return metaCache.get(chatId);
+  let nombre = null;
+  try {
+    const meta = await sock.groupMetadata(chatId);
+    nombre = meta?.subject || null;
+  } catch (err) {
+    console.warn(`[WA] groupMetadata falló para ${chatId}: ${err.message} — probando nombre conocido en DB`);
+  }
+  if (!nombre) nombre = await obtenerNombreChatConocido(chatId);
+  if (nombre) {
+    metaCache.set(chatId, nombre);
+    nombresGrupos.set(chatId, nombre);
+  }
+  return nombre;
 }
 
 function normalizarJid(jid) {
@@ -138,17 +182,7 @@ async function iniciarCliente(callbacks = {}) {
 
         let chatNombre = nombresChats.get(chatId) || null;
         if (!chatNombre && chatId.endsWith('@g.us')) {
-          if (metaCache.has(chatId)) {
-            chatNombre = metaCache.get(chatId);
-          } else {
-            try {
-              const meta = await sock.groupMetadata(chatId);
-              chatNombre = meta.subject;
-            } catch {
-              chatNombre = null;
-            }
-            metaCache.set(chatId, chatNombre);
-          }
+          chatNombre = await nombreDeGrupo(chatId, metaCache);
         }
         if (!chatNombre && !chatId.endsWith('@g.us')) chatNombre = remitente;
 
@@ -193,6 +227,9 @@ async function iniciarCliente(callbacks = {}) {
       // inactivo, así las push siguen llegando al teléfono aunque el bot esté conectado.
       try { await sock.sendPresenceUpdate('unavailable'); } catch {}
       console.log(`[WA] Cliente listo — escuchando mensajes (presencia: unavailable)`);
+      // Precargar los nombres de todos los grupos (archivados incluidos) para
+      // que la ráfaga de mensajes offline no dependa de groupMetadata.
+      cargarNombresGrupos().catch(() => {});
       if (callbacks.onListo) callbacks.onListo();
     }
 
@@ -251,6 +288,7 @@ async function iniciarCliente(callbacks = {}) {
     const dias = config.dias_historial ?? 15;
     const limiteTimestamp = Math.floor(Date.now() / 1000) - dias * 86400;
     const metaCache = new Map(); // evita pedir groupMetadata por cada mensaje en una ráfaga
+    const descartadosPorChat = new Map(); // grupos filtrados en esta ráfaga, para el log
     let recuperados = 0;
     let sinContenido = 0;
 
@@ -279,22 +317,20 @@ async function iniciarCliente(callbacks = {}) {
 
         let chatNombre = remitente;
         if (chatId.endsWith('@g.us')) {
-          if (metaCache.has(chatId)) {
-            chatNombre = metaCache.get(chatId);
-          } else {
-            try {
-              const meta = await sock.groupMetadata(chatId);
-              chatNombre = meta.subject;
-            } catch {
-              chatNombre = null;
-            }
-            metaCache.set(chatId, chatNombre);
-          }
+          chatNombre = await nombreDeGrupo(chatId, metaCache);
         }
 
         const msgData = { chatId, chatNombre, remitente, remitenteId, cuerpo, timestamp: ts };
 
-        if (!debeAnalizarse(msgData)) continue;
+        if (!debeAnalizarse(msgData)) {
+          // Dejar rastro de lo que se descarta: sin esto era imposible ver en
+          // los logs que un grupo entero (ej. mal matcheado) se estaba filtrando.
+          if (chatId.endsWith('@g.us')) {
+            const k = chatNombre || chatId;
+            descartadosPorChat.set(k, (descartadosPorChat.get(k) || 0) + 1);
+          }
+          continue;
+        }
 
         const { esVip, tieneKeyword } = obtenerFlags(msgData);
         const insertado = await guardarMensaje({ ...msgData, esVip, tieneKeyword });
@@ -313,6 +349,10 @@ async function iniciarCliente(callbacks = {}) {
 
     if (type === 'append' && recuperados > 0) {
       console.log(`[WA] Catch-up al reconectar: ${recuperados} mensajes recuperados (duplicados ignorados)`);
+    }
+    if (descartadosPorChat.size > 0) {
+      const detalle = [...descartadosPorChat].map(([n, c]) => `"${n}" ×${c}`).join(', ');
+      console.log(`[WA] Grupos NO monitoreados descartados (${type}): ${detalle} — si alguno debería estar en el digest, agregalo en /configurar`);
     }
     if (sinContenido > 0) {
       console.warn(`[WA] ⚠️ ${sinContenido} mensaje(s) llegaron sin contenido descifrable (${type}). Si esto se repite en cada conexión, la sesión está corrupta: usar /limpiar-sesion y re-escanear el QR.`);

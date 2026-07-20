@@ -152,9 +152,10 @@ async function resumirBatchIndividuales(mensajes, hoy, contactos = new Map()) {
  * Devuelve { temas: [...], idsProcesados: [...] }
  */
 async function analizarChat(chatNombre, mensajes) {
-  if (!mensajes.length) return { temas: [], idsProcesados: [] };
+  if (!mensajes.length) return { temas: [], idsProcesados: [], errores: 0 };
   const temas = [];
   const idsProcesados = [];
+  let errores = 0;
   const promptGrupos = buildPromptGrupos(chatNombre);
 
   for (let i = 0; i < mensajes.length; i += BATCH_SIZE) {
@@ -170,11 +171,12 @@ async function analizarChat(chatNombre, mensajes) {
       idsProcesados.push(...batch.map((m) => m.id));
       console.log(`[Gemini] Batch ${numBatch} OK — ${resultado.length} temas`);
     } catch (err) {
+      errores++;
       console.error(`[Gemini] Error en batch ${numBatch} de "${chatNombre}":`, err.message);
     }
   }
 
-  return { temas, idsProcesados };
+  return { temas, idsProcesados, errores };
 }
 
 /**
@@ -215,11 +217,12 @@ async function analizarMensajes(mensajes) {
 }
 
 async function analizarIndividuales(mensajes, contactos = new Map()) {
-  if (!mensajes.length) return { eventos: [], compromisos: [], pedidos: [], idsProcesados: [] };
+  if (!mensajes.length) return { eventos: [], compromisos: [], pedidos: [], idsProcesados: [], errores: 0 };
   const eventos = [];
   const compromisos = [];
   const pedidos = [];
   const idsProcesados = [];
+  let errores = 0;
   const hoy = new Date().toISOString().slice(0, 10);
 
   for (let i = 0; i < mensajes.length; i += BATCH_SIZE) {
@@ -237,11 +240,12 @@ async function analizarIndividuales(mensajes, contactos = new Map()) {
       idsProcesados.push(...batch.map((m) => m.id));
       console.log(`[Gemini] Batch ${numBatch} OK — ${resultado.eventos?.length || 0} eventos, ${resultado.compromisos?.length || 0} compromisos, ${resultado.pedidos?.length || 0} pedidos`);
     } catch (err) {
+      errores++;
       console.error(`[Gemini] Error en batch ${numBatch}:`, err.message);
     }
   }
 
-  return { eventos, compromisos, pedidos, idsProcesados };
+  return { eventos, compromisos, pedidos, idsProcesados, errores };
 }
 
 /**

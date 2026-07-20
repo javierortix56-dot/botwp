@@ -6,12 +6,37 @@ let config = require('./config.json');
 // grupos recién agregados no se guardaban. recargar() lo corrige.
 let vips, gruposNombres, keywords;
 
+// Normaliza nombres de chat para comparar: sin mayúsculas, sin tildes, sin
+// º/°/ª y sin puntuación. Los nombres reales de los grupos difieren del
+// config en detalles invisibles ("5° " vs "5º", un espacio antes de un
+// paréntesis, una tilde) y el includes() literal no matcheaba nunca → los
+// mensajes de esos grupos se descartaban en silencio y el digest salía
+// "todo tranquilo".
+function normalizarNombre(s) {
+  return (s || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[º°ª]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+// Match tolerante: el nombre real contiene al configurado, o al revés (por si
+// el grupo se renombró más corto). El mínimo de 5 caracteres evita que un
+// nombre muy corto matchee cualquier cosa.
+function coincideNombreGrupo(nombreNorm, configNorm) {
+  if (!nombreNorm || !configNorm) return false;
+  if (nombreNorm.includes(configNorm)) return true;
+  return nombreNorm.length >= 5 && configNorm.includes(nombreNorm);
+}
+
 function recargar() {
   delete require.cache[require.resolve('./config.json')];
   config = require('./config.json');
   vips = new Set(config.vips.map((n) => n.replace(/\D/g, '')));
   // Soportar grupos como strings (legacy) o como objetos { nombre, frecuencia_horas }
-  gruposNombres = config.grupos.map((g) => (typeof g === 'string' ? g : g.nombre).toLowerCase().trim());
+  gruposNombres = config.grupos.map((g) => normalizarNombre(typeof g === 'string' ? g : g.nombre));
   keywords = config.keywords.map((k) => k.toLowerCase().trim());
 }
 
@@ -23,8 +48,8 @@ function esVip(remitenteId) {
 }
 
 function esGrupoMonitoreado(chatNombre) {
-  const nombre = (chatNombre || '').toLowerCase().trim();
-  return gruposNombres.some((g) => nombre.includes(g));
+  const nombre = normalizarNombre(chatNombre);
+  return gruposNombres.some((g) => coincideNombreGrupo(nombre, g));
 }
 
 function tieneKeyword(cuerpo) {
@@ -61,10 +86,10 @@ function obtenerFlags(msg) {
  * o null si el chat no está configurado.
  */
 function obtenerFrecuenciaGrupo(chatNombre) {
-  const nombre = (chatNombre || '').toLowerCase().trim();
+  const nombre = normalizarNombre(chatNombre);
   const grupoConfig = config.grupos.find((g) => {
-    const gNombre = (typeof g === 'string' ? g : g.nombre).toLowerCase().trim();
-    return nombre.includes(gNombre);
+    const gNombre = normalizarNombre(typeof g === 'string' ? g : g.nombre);
+    return coincideNombreGrupo(nombre, gNombre);
   });
   if (!grupoConfig) return null;
   if (typeof grupoConfig === 'string') return null; // legacy sin frecuencia
@@ -75,10 +100,10 @@ function obtenerFrecuenciaGrupo(chatNombre) {
  * Devuelve el objeto config completo del grupo que hace match, o null si no está.
  */
 function obtenerConfigGrupo(chatNombre) {
-  const nombre = (chatNombre || '').toLowerCase().trim();
+  const nombre = normalizarNombre(chatNombre);
   const grupoConfig = config.grupos.find((g) => {
-    const gNombre = (typeof g === 'string' ? g : g.nombre).toLowerCase().trim();
-    return nombre.includes(gNombre);
+    const gNombre = normalizarNombre(typeof g === 'string' ? g : g.nombre);
+    return coincideNombreGrupo(nombre, gNombre);
   });
   return grupoConfig || null;
 }
