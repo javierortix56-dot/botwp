@@ -190,6 +190,26 @@ async function obtenerChatsDistintos(dias = 30) {
 }
 
 /**
+ * Último nombre conocido de un chat, sacado de los mensajes ya guardados.
+ * Se usa como fallback cuando groupMetadata falla al reconectar: sin nombre,
+ * el filtro de grupos monitoreados descartaba el mensaje en silencio.
+ */
+async function obtenerNombreChatConocido(chatId) {
+  try {
+    const result = await db.execute({
+      sql: `SELECT chat_nombre FROM mensajes
+            WHERE chat_id = ? AND chat_nombre IS NOT NULL
+            ORDER BY id DESC LIMIT 1`,
+      args: [chatId],
+    });
+    return result.rows[0]?.chat_nombre || null;
+  } catch (err) {
+    console.error(`[DB] Error buscando nombre conocido de ${chatId}:`, err.message);
+    return null;
+  }
+}
+
+/**
  * Devuelve mensajes sin procesar de un chat específico, ordenados por timestamp ASC.
  */
 async function obtenerMensajesChatSinProcesar(chatId) {
@@ -396,6 +416,7 @@ module.exports = {
   useTursoAuthState,
   limpiarAuth,
   obtenerChatsDistintos,
+  obtenerNombreChatConocido,
   obtenerMensajesChatSinProcesar,
   obtenerUltimoProcesado,
   actualizarUltimoProcesado,

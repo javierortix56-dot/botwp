@@ -692,14 +692,17 @@ async function analizarLote(todos, etiqueta) {
   }
   const resumenesChats = [];
   const idsProcesados = [];
+  let erroresAnalisis = 0;
   for (const [chatId, mensajesChat] of porChat) {
     const chatNombre = mensajesChat[0].chat_nombre || chatId;
     console.log(`[Análisis${etiqueta ? ' ' + etiqueta : ''}] "${chatNombre}" (${mensajesChat.length} mensajes)`);
     try {
-      const { temas, idsProcesados: ids } = await analizarChat(chatNombre, mensajesChat);
+      const { temas, idsProcesados: ids, errores } = await analizarChat(chatNombre, mensajesChat);
       idsProcesados.push(...ids);
+      erroresAnalisis += errores || 0;
       if (temas.length) resumenesChats.push({ chatNombre, temas });
     } catch (err) {
+      erroresAnalisis++;
       console.error(`[Análisis] Error analizando "${chatNombre}":`, err.message);
     }
   }
@@ -711,7 +714,9 @@ async function analizarLote(todos, etiqueta) {
       const r = await analizarIndividuales(individuales, contactos);
       resIndiv = r;
       idsProcesados.push(...(r.idsProcesados || []));
+      erroresAnalisis += r.errores || 0;
     } catch (err) {
+      erroresAnalisis++;
       console.error(`[Análisis] Error analizando individuales:`, err.message);
     }
   }
@@ -732,7 +737,7 @@ async function analizarLote(todos, etiqueta) {
   const totalTemas = resumenesChats.reduce((a, r) => a + r.temas.length, 0)
     + (resIndiv.eventos?.length || 0) + (resIndiv.compromisos?.length || 0) + (resIndiv.pedidos?.length || 0);
 
-  return { texto, idsProcesados, totalTemas, meta };
+  return { texto, idsProcesados, totalTemas, meta, erroresAnalisis };
 }
 
 /**
@@ -796,11 +801,15 @@ async function generarDigest(etiqueta) {
         return;
       }
 
-      let { texto, idsProcesados, totalTemas } = await analizarLote(todos, etiqueta);
+      let { texto, idsProcesados, totalTemas, erroresAnalisis } = await analizarLote(todos, etiqueta);
 
-      // Hubo mensajes pero nada relevante: mensaje corto en vez del esqueleto del digest
+      // Hubo mensajes pero nada relevante: mensaje corto en vez del esqueleto del digest.
+      // Si además hubo errores de análisis, decirlo — antes un fallo total de Gemini
+      // salía disfrazado de "todo tranquilo" y era imposible enterarse.
       if (totalTemas === 0) {
-        texto = `✅ *Todo tranquilo* — revisé ${todos.length} mensajes y no hay nada pendiente para vos. Solo charla.`;
+        texto = erroresAnalisis > 0
+          ? `⚠️ *Ojo* — había ${todos.length} mensajes nuevos pero falló el análisis (${erroresAnalisis} error/es con Gemini). Lo pendiente se reintenta en el próximo resumen.`
+          : `✅ *Todo tranquilo* — revisé ${todos.length} mensajes y no hay nada pendiente para vos. Solo charla.`;
       }
 
       let enviado = false;
