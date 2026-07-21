@@ -20,7 +20,9 @@
   },
   "conexion": {
     "modo_ahorro_notificaciones": true,
-    "minutos_gracia_arranque": 3,
-    "minutos_conectado_tras_tarea": 2
+    "minutos_gracia_arranque": 5,
+    "minutos_conectado_tras_tarea": 10,
+    "sync_quiet_segundos": 20,
+    "sync_max_segundos": 240
   }
 }
