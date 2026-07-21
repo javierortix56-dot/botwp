@@ -494,14 +494,24 @@ async function desconectar() {
 /**
  * Espera a que termine de bajar la cola de mensajes offline tras conectar:
  * resuelve cuando pasan quietMs sin recibir mensajes nuevos, con tope maxMs.
+ *
+ * La ventana se agrandó a propósito (default 20s de silencio, tope 240s): con
+ * modo ahorro, al reconectar puede haber cientos de mensajes acumulados (grupos
+ * archivados incluidos) y encima Baileys reintenta los que fallan al descifrar
+ * ("Bad MAC") pidiéndolos de nuevo — esos reenvíos llegan segundos después y
+ * mantienen viva la actividad, así que esperar más deja que el backlog COMPLETO
+ * y los reintentos terminen antes de analizar. Antes, con 90s, el digest se
+ * armaba con la cola a medio bajar y salía casi vacío.
  */
-async function esperarSincronizacion(quietMs = 15000, maxMs = 90000) {
+async function esperarSincronizacion(quietMs, maxMs) {
+  const quiet = quietMs ?? (config.conexion?.sync_quiet_segundos ?? 20) * 1000;
+  const max = maxMs ?? (config.conexion?.sync_max_segundos ?? 240) * 1000;
   const inicio = Date.now();
-  while (Date.now() - inicio < maxMs) {
-    if (Date.now() - ultimaActividadMensajes >= quietMs) return;
+  while (Date.now() - inicio < max) {
+    if (Date.now() - ultimaActividadMensajes >= quiet) return;
     await new Promise((r) => setTimeout(r, 1000));
   }
-  console.warn(`[WA] esperarSincronizacion: tope de ${maxMs / 1000}s alcanzado — sigo con lo que haya`);
+  console.warn(`[WA] esperarSincronizacion: tope de ${max / 1000}s alcanzado — sigo con lo que haya`);
 }
 
 module.exports = {
