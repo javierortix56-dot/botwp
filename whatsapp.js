@@ -21,6 +21,12 @@ let callbacksGuardados = {};
 // para saber cuándo terminó de bajar la cola offline tras reconectar.
 let ultimaActividadMensajes = 0;
 
+// Cuenta de reconexiones seguidas sin llegar a 'open'. Se usa para backoff
+// exponencial: si WhatsApp corta apenas conectamos (ej. 428 en bucle), NO hay
+// que martillar cada 3s — eso puede hacer que WhatsApp limite el número. Se
+// resetea a 0 cuando la conexión llega a 'open'.
+let intentosReconexion = 0;
+
 // Últimos mensajes salientes (id → contenido proto). Cuando el teléfono no puede
 // descifrar un digest ("Esperando el mensaje...") pide un reintento, y Baileys
 // necesita getMessage() para reenviarlo — sin esto el mensaje queda ilegible
@@ -113,14 +119,15 @@ async function iniciarCliente(callbacks = {}) {
     // en iOS: WhatsApp prioriza el push al teléfono cuando asume que el linked
     // device es un desktop ocioso en vez de un navegador activo.
     browser: ['Mac OS', 'Safari', '15.0'],
-    // syncFullHistory: con false WhatsApp solo manda una ventana chica de
-    // historial al vincularse, y el backlog viejo de los grupos ARCHIVADOS
-    // (mensajes que llegaron mientras el bot no estaba vinculado) nunca baja →
-    // el digest sale con 4 mensajes aunque el teléfono tenga cientos sin leer.
-    // Con true pide el historial completo al vincular y recupera ese backlog.
-    // Configurable (`conexion.historial_completo`, default true) por si hay que
-    // revertir: la teoría anterior era que false reducía la supresión de push.
-    syncFullHistory: config.conexion?.historial_completo !== false,
+    // syncFullHistory: con true pide el historial completo al vincular (traería
+    // el backlog de los grupos archivados), PERO en cuentas con mucho historial
+    // WhatsApp corta la conexión con 428 antes de terminar de conectar y el bot
+    // queda en un bucle de reconexión infinito. Por eso queda en FALSE por
+    // default. Configurable (`conexion.historial_completo`) — no lo pongas en
+    // true a menos que la cuenta tenga poco historial. Para recuperar backlog de
+    // archivados sin romper la conexión, la vía correcta es el history sync
+    // on-demand (fetchMessageHistory), no este flag.
+    syncFullHistory: config.conexion?.historial_completo === true,
     markOnlineOnConnect: false,
     // Servir reintentos de descifrado: si el teléfono no pudo leer un mensaje
     // nuestro, lo reenviamos desde este cache en vez de dejarlo "Esperando...".
@@ -225,6 +232,7 @@ async function iniciarCliente(callbacks = {}) {
 
     if (connection === 'open') {
       listo = true;
+      intentosReconexion = 0; // conexión sana — resetea el backoff
       ultimaActividadMensajes = Date.now();
       // Presencia "unavailable": le dice a WhatsApp que este dispositivo está
       // inactivo, así las push siguen llegando al teléfono aunque el bot esté conectado.
@@ -268,9 +276,14 @@ async function iniciarCliente(callbacks = {}) {
         return;
       }
 
-      // Backoff exponencial para reintentos genéricos: 3s, 10s, 30s, luego cada 60s
-      const delay = code === DisconnectReason.connectionReplaced ? 30000 : 3000;
-      console.log(`[WA] Reintentando conexión en ${delay / 1000}s...`);
+      // Backoff exponencial real para reintentos genéricos (incluye el 428
+      // "Connection Terminated" en bucle): 3s, 6s, 12s, 24s, 48s, tope 60s.
+      // Antes era 3s fijo y un corte persistente martillaba a WhatsApp sin
+      // parar, arriesgando que limiten el número.
+      intentosReconexion++;
+      const base = code === DisconnectReason.connectionReplaced ? 30000 : 3000;
+      const delay = Math.min(base * 2 ** (intentosReconexion - 1), 60000);
+      console.log(`[WA] Reintentando conexión en ${delay / 1000}s... (intento ${intentosReconexion})`);
       setTimeout(() => {
         iniciarCliente(callbacks).catch((err) =>
           console.error(`[WA] Error reintentando:`, err.message)
