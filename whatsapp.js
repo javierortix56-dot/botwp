@@ -113,11 +113,14 @@ async function iniciarCliente(callbacks = {}) {
     // en iOS: WhatsApp prioriza el push al teléfono cuando asume que el linked
     // device es un desktop ocioso en vez de un navegador activo.
     browser: ['Mac OS', 'Safari', '15.0'],
-    // syncFullHistory:false hace que el bot parezca un cliente "pasivo" para WA,
-    // reduciendo aún más la supresión de notificaciones. Los mensajes que llegan
-    // mientras el bot está desconectado (modo ahorro) los entrega WhatsApp igual
-    // al reconectar, como 'append' — no dependemos del history sync completo.
-    syncFullHistory: false,
+    // syncFullHistory: con false WhatsApp solo manda una ventana chica de
+    // historial al vincularse, y el backlog viejo de los grupos ARCHIVADOS
+    // (mensajes que llegaron mientras el bot no estaba vinculado) nunca baja →
+    // el digest sale con 4 mensajes aunque el teléfono tenga cientos sin leer.
+    // Con true pide el historial completo al vincular y recupera ese backlog.
+    // Configurable (`conexion.historial_completo`, default true) por si hay que
+    // revertir: la teoría anterior era que false reducía la supresión de push.
+    syncFullHistory: config.conexion?.historial_completo !== false,
     markOnlineOnConnect: false,
     // Servir reintentos de descifrado: si el teléfono no pudo leer un mensaje
     // nuestro, lo reenviamos desde este cache en vez de dejarlo "Esperando...".
