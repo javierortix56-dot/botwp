@@ -19,11 +19,14 @@
     "max_temas_grupo": 8
   },
   "conexion": {
-    "modo_ahorro_notificaciones": true,
+    "modo_ahorro_notificaciones": false,
     "historial_completo": false,
     "minutos_gracia_arranque": 10,
     "minutos_conectado_tras_tarea": 10,
     "sync_quiet_segundos": 20,
     "sync_max_segundos": 240
+  },
+  "vision": {
+    "describir_imagenes": true
   }
 }

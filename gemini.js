@@ -249,6 +249,28 @@ async function analizarIndividuales(mensajes, contactos = new Map()) {
 }
 
 /**
+ * Describe con Gemini (multimodal) qué se ve en una imagen compartida en un
+ * chat, en una frase corta. Pensado para grupos tipo "roperito" donde la foto
+ * ES el contenido (productos en venta, flyers, comprobantes). Devuelve '' si
+ * falla — nunca rompe la captura del mensaje.
+ */
+async function describirImagen(base64Data, mimeType, caption = '') {
+  if (!base64Data) return '';
+  const ctx = caption ? ` Vino con este texto: "${caption}".` : '';
+  const prompt = `Esta es una imagen compartida en un grupo de WhatsApp.${ctx} Describí en UNA sola frase corta y concreta qué se ve, priorizando lo útil para el dueño del teléfono: si es un producto en venta decí qué es, estado y precio si aparece; si es un flyer/afiche, el dato principal (qué, cuándo, dónde); si es un comprobante o documento, qué es. Sin introducción ni comillas, solo la frase.`;
+  try {
+    const result = await model.generateContent([
+      { inlineData: { mimeType: mimeType || 'image/jpeg', data: base64Data } },
+      { text: prompt },
+    ]);
+    return result.response.text().trim().replace(/\s+/g, ' ').slice(0, 300);
+  } catch (err) {
+    console.warn(`[Gemini] No se pudo describir imagen:`, err.message);
+    return '';
+  }
+}
+
+/**
  * Genera el "titular del día": una frase corta en tono de asistente personal
  * que resume lo más importante de los pendientes. Si falla, devuelve '' y el
  * digest sale sin titular (nunca rompe el envío).
@@ -269,4 +291,4 @@ Escribí UNA sola frase (máximo 25 palabras) que le resuma lo más importante, 
   }
 }
 
-module.exports = { analizarMensajes, analizarChat, analizarIndividuales, generarTitular };
+module.exports = { analizarMensajes, analizarChat, analizarIndividuales, generarTitular, describirImagen };
