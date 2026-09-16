@@ -63,6 +63,8 @@ function esIndividual(chatId) {
 
 function debeAnalizarse(msg) {
   try {
+    const propio = (process.env.MY_WHATSAPP_ID || '').replace('@c.us', '@s.whatsapp.net');
+    if (msg.chatId === propio || !/@(g\.us|s\.whatsapp\.net|lid)$/.test(msg.chatId || '')) return false;
     const vip = esVip(msg.remitenteId);
     const grupo = esGrupoMonitoreado(msg.chatNombre);
     const keyword = tieneKeyword(msg.cuerpo);

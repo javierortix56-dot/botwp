@@ -93,6 +93,11 @@ async function conectar() {
     );
   `), 'schema');
 
+  const columnas = await dbExecute('PRAGMA table_info(mensajes)', 'columnas');
+  if (!columnas.rows.some(c => c.name === 'es_propio')) {
+    await dbExecute('ALTER TABLE mensajes ADD COLUMN es_propio INTEGER DEFAULT 0', 'migrar-es-propio');
+  }
+
   // Crear índice único para deduplicación. Si ya hay duplicados de antes
   // del fix, borramos los repetidos (conservando el de menor id) y luego
   // creamos el índice. Idempotente: si el índice ya existe, no hace nada.
@@ -115,12 +120,12 @@ async function conectar() {
   console.log(`[DB] Conectado a Turso y tablas listas`);
 }
 
-async function guardarMensaje({ chatId, chatNombre, remitente, remitenteId, cuerpo, timestamp, esVip, tieneKeyword }) {
+async function guardarMensaje({ chatId, chatNombre, remitente, remitenteId, cuerpo, timestamp, esVip, tieneKeyword, esPropio = false }) {
   try {
     const result = await dbExecute({
-      sql: `INSERT OR IGNORE INTO mensajes (chat_id, chat_nombre, remitente, remitente_id, cuerpo, timestamp, es_vip, tiene_keyword)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [chatId, chatNombre ?? null, remitente ?? null, remitenteId ?? null, cuerpo, timestamp, esVip ? 1 : 0, tieneKeyword ? 1 : 0],
+      sql: `INSERT OR IGNORE INTO mensajes (chat_id, chat_nombre, remitente, remitente_id, cuerpo, timestamp, es_vip, tiene_keyword, es_propio)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [chatId, chatNombre ?? null, remitente ?? null, remitenteId ?? null, cuerpo, timestamp, esVip ? 1 : 0, tieneKeyword ? 1 : 0, esPropio ? 1 : 0],
     }, 'guardarMensaje');
     return result.rowsAffected > 0;
   } catch (err) {
@@ -132,7 +137,14 @@ async function guardarMensaje({ chatId, chatNombre, remitente, remitenteId, cuer
 async function obtenerMensajesSinProcesar() {
   try {
     const result = await db.execute(
-      `SELECT * FROM mensajes WHERE procesado = 0 ORDER BY timestamp ASC`
+      `SELECT *, CASE WHEN procesado = 1 THEN 1 ELSE 0 END AS solo_contexto
+       FROM mensajes WHERE procesado = 0 OR
+       id IN (SELECT id FROM (
+         SELECT id, ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY timestamp DESC, id DESC) AS posicion
+         FROM mensajes WHERE procesado = 1 AND timestamp >= unixepoch() - 7 * 86400
+         AND chat_id IN (SELECT DISTINCT chat_id FROM mensajes WHERE procesado = 0)
+       ) WHERE posicion <= 50)
+       ORDER BY timestamp ASC`
     );
     return result.rows;
   } catch (err) {

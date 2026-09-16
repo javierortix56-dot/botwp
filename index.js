@@ -169,21 +169,22 @@ function extraerAccionables(resumenesChats, resIndiv, contactos) {
 
   for (const { chatNombre, temas } of resumenesChats) {
     for (const t of temas) {
+      if (!t.para_mi || t.estado !== 'pendiente') continue;
       const fecha = parseFecha(t.fecha_limite);
-      if (t.me_piden || t.tipo === 'accion') {
+      if (t.tipo === 'accion') {
         const q = t.accion || t.resumen;
-        if (nuevo(`${t.tema}${q}`)) pendientes.push({ emoji: '🔴', texto: q, origen: `${chatNombre}${t.de ? ` · ${t.de}` : ''}`, fecha });
+        if (nuevo(`${chatNombre}|${t.tema}|${q}`)) pendientes.push({ emoji: '🔴', texto: q, origen: `${chatNombre}${t.de ? ` · ${t.de}` : ''}`, fecha });
       } else if (t.tipo === 'pago') {
-        if (nuevo(`${t.tema}${t.resumen}`)) pendientes.push({ emoji: '💰', texto: t.resumen, origen: chatNombre, fecha });
+        if (nuevo(`${chatNombre}|${t.tema}|${t.resumen}`)) pendientes.push({ emoji: '💰', texto: t.resumen, origen: chatNombre, fecha });
       } else if (t.tipo === 'evento') {
-        if (nuevo(`${t.tema}${t.resumen}`)) agenda.push({ texto: t.resumen, origen: chatNombre, fecha, fechaRaw: t.fecha_limite });
+        if (nuevo(`${chatNombre}|${t.tema}|${t.resumen}`)) agenda.push({ texto: t.resumen, origen: chatNombre, fecha, fechaRaw: t.fecha_limite });
       }
     }
   }
 
   (resIndiv.pedidos || []).forEach((p) => {
     if (!nuevo(`${p.de}${p.pedido}`)) return;
-    pendientes.push({ emoji: '🔴', texto: p.pedido, origen: resolverNombreIndiv(p.chat || p.de, contactos), fecha: null });
+    pendientes.push({ emoji: '🔴', texto: p.pedido, origen: resolverNombreIndiv(p.chat || p.de, contactos), fecha: parseFecha(p.fecha_limite) });
   });
   (resIndiv.compromisos || []).forEach((c) => {
     if (!nuevo(`${c.tema}${c.resumen}`)) return;
@@ -250,12 +251,13 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
   // De qué se habló: resumen de TODOS los temas de cada grupo (aunque no sean
   // para el dueño), un renglón por tema, agrupados bajo el nombre del grupo.
   // Tope configurable por grupo para no inflar el mensaje si un grupo explotó.
-  const maxTemasGrupo = config.resumen?.max_temas_grupo ?? 8;
+  const maxTemasGrupo = Math.min(config.resumen?.max_temas_grupo ?? 5, 5);
   const bloquesGrupo = [];
   for (const { chatNombre, temas } of resumenesChats) {
     const vistosInfo = new Set();
     const infos = temas
-      .filter((t) => t.tipo === 'info' && !t.me_piden)
+      .filter((t) => !(t.para_mi && t.estado === 'pendiente' && ['accion', 'pago', 'evento'].includes(t.tipo)))
+      .sort((a, b) => b.relevancia - a.relevancia)
       .filter((t) => {
         const k = normalizarClave(t.resumen);
         if (k && vistosInfo.has(k)) return false;
@@ -273,7 +275,7 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
   }
   if (bloquesGrupo.length) {
     out.push('');
-    out.push('💬 *De qué se habló*');
+    out.push('📢 *Novedades de tus grupos*');
     out.push('');
     out.push(bloquesGrupo.join('\n\n'));
   }
@@ -491,6 +493,11 @@ function generarPaginaConfiguracion(chatsDB, configActual, contactos, mensaje) {
 
 function iniciarServidor() {
   const server = http.createServer(async (req, res) => {
+    if (req.url === '/health' && req.method === 'GET') {
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ version: 'resumenes-v2', whatsapp: estadoWA }));
+      return;
+    }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
 
     if (req.url === '/test' && req.method === 'GET') {
@@ -732,12 +739,16 @@ async function analizarLote(todos, etiqueta) {
     titular = await generarTitular(itemsTitular);
   }
 
-  const meta = { etiqueta, totalMensajes: todos.length, titular };
+  const meta = { etiqueta, totalMensajes: todos.filter(m => !m.solo_contexto).length, titular };
   const texto = formatearDigest(accionables, resumenesChats, meta);
+  const conversaciones = (resIndiv.conversaciones || []).filter(c => c.temas.length);
+  const detalleConversaciones = conversaciones.length
+    ? '\n\n💬 *Tus conversaciones*\n' + conversaciones.map(c => `*${c.chatNombre}*\n${c.temas.slice(0, 3).map(t => '• ' + t.resumen).join('\n')}`).join('\n\n')
+    : '';
   const totalTemas = resumenesChats.reduce((a, r) => a + r.temas.length, 0)
-    + (resIndiv.eventos?.length || 0) + (resIndiv.compromisos?.length || 0) + (resIndiv.pedidos?.length || 0);
+    + conversaciones.reduce((n, c) => n + c.temas.length, 0);
 
-  return { texto, idsProcesados, totalTemas, meta, erroresAnalisis };
+  return { texto: texto + detalleConversaciones, idsProcesados, totalTemas, meta, erroresAnalisis };
 }
 
 /**
@@ -825,7 +836,7 @@ async function generarDigest(etiqueta) {
       // quedan pendientes y el contenido se reintenta en el próximo digest (no se pierde).
       if (enviado) {
         await marcarProcesados(idsProcesados);
-        const fallidos = todos.length - idsProcesados.length;
+    const fallidos = todos.filter(m => !m.solo_contexto).length - idsProcesados.length;
         console.log(`[Digest] Enviado — ${totalTemas} temas, ${idsProcesados.length} mensajes procesados${fallidos > 0 ? `, ${fallidos} pendientes para el próximo digest` : ''}`);
       } else {
         console.warn(`[Digest] Envío fallido — no se marcan procesados, se reintenta en el próximo digest`);
