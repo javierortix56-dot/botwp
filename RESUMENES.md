@@ -1,8 +1,8 @@
-# Resúmenes centrados en el dueño
+# Resúmenes centrados en JO
 
 - Se capturan mensajes recibidos y enviados; `es_propio` se agrega de forma aditiva a Turso al arrancar. No cambia la sesión de WhatsApp.
 - Cada chat se analiza por separado. Cada bloque actualiza un estado consolidado, incluyendo resoluciones y cancelaciones posteriores.
-- Solo acciones y pagos explícitamente aplicables al dueño y pendientes aparecen en «Para resolver». Fechas relativas usan la fecha del mensaje en Buenos Aires.
+- Solo acciones y pagos explícitamente aplicables a JO y pendientes aparecen en «Para resolver». Fechas relativas usan la fecha del mensaje en Buenos Aires.
 - Se agregan novedades relevantes de grupos y síntesis de conversaciones individuales. La selección usa los grupos configurados, no el estado archivado de WhatsApp.
 - El digest automático lee hasta 50 mensajes ya procesados de los últimos siete días por chat activo como contexto. No los marca de nuevo ni repite temas sin evidencia nueva.
 - Cada tema requiere ids válidos de evidencia. Un fallo de análisis deja el chat pendiente y evita publicar un estado parcial.

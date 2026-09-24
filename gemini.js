@@ -90,7 +90,7 @@ async function analizarIndividuales(mensajes, contactos = new Map()) {
 async function describirImagen(base64Data, mimeType, caption = '') {
   if (!base64Data) return '';
   const ctx = caption ? ` Vino con este texto: "${caption}".` : '';
-  const prompt = `Esta es una imagen compartida en un grupo de WhatsApp.${ctx} Describí en UNA sola frase corta y concreta qué se ve, priorizando lo útil para el dueño del teléfono: si es un producto en venta decí qué es, estado y precio si aparece; si es un flyer/afiche, el dato principal (qué, cuándo, dónde); si es un comprobante o documento, qué es. Sin introducción ni comillas, solo la frase.`;
+  const prompt = `Esta es una imagen compartida en un grupo de WhatsApp.${ctx} Describí en UNA sola frase corta y concreta qué se ve, priorizando lo útil para ${config.nombre_dueno || 'la persona'}: si es un producto en venta decí qué es, estado y precio si aparece; si es un flyer/afiche, el dato principal (qué, cuándo, dónde); si es un comprobante o documento, qué es. Sin introducción ni comillas, solo la frase.`;
   try {
     const result = await model.generateContent([
       { inlineData: { mimeType: mimeType || 'image/jpeg', data: base64Data } },

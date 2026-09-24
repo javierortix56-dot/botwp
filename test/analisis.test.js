@@ -14,7 +14,7 @@ test('una respuesta propia posterior resuelve el pedido entre bloques', async ()
     n++;
     if (n === 2) {
       assert.match(prompt, /ESTADO ANTERIOR:.*Confirmar reserva/);
-      assert.match(prompt, /"autor":"DUEÑO"/);
+      assert.match(prompt, /"autor":"Javier"/);
     }
     return JSON.stringify([tema(n === 1 ? [1] : [1, 2], n === 1 ? {} : { tipo: 'info', estado: 'resuelto', resumen: 'Reserva confirmada' })]);
   }, config);

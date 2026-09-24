@@ -249,7 +249,7 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
   }
 
   // De qué se habló: resumen de TODOS los temas de cada grupo (aunque no sean
-  // para el dueño), un renglón por tema, agrupados bajo el nombre del grupo.
+  // para JO), un renglón por tema, agrupados bajo el nombre del grupo.
   // Tope configurable por grupo para no inflar el mensaje si un grupo explotó.
   const maxTemasGrupo = Math.min(config.resumen?.max_temas_grupo ?? 5, 5);
   const bloquesGrupo = [];
@@ -797,7 +797,7 @@ async function generarDigest(etiqueta) {
     await conTareaConectada(`digest${etiqueta ? ' ' + etiqueta : ''}`, async () => {
       const todos = await obtenerMensajesSinProcesar();
       if (!todos.length) {
-        // Mensaje corto igual: el dueño sabe que el bot está vivo y no se perdió nada
+        // Mensaje corto igual: JO sabe que el bot está vivo y no se perdió nada
         console.log(`[Digest] Sin mensajes pendientes — enviando "todo tranquilo"`);
         const txt = `✅ *Todo tranquilo* — no hubo mensajes nuevos desde el último resumen.`;
         // ntfy SIEMPRE, aunque no haya nada: antes este camino hacía return sin
