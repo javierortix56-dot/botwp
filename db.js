@@ -166,6 +166,53 @@ async function obtenerMensajesDesde(timestampDesde) {
   }
 }
 
+/**
+ * Chats individuales donde el último mensaje es de la otra persona y JO no
+ * respondió después. El último mensaje tiene que caer dentro de los últimos
+ * `dias` días y tener al menos `horasMin` horas, para no marcar una charla que
+ * está en curso. Devuelve [{ chat_id, ts_ult, mensajes }] con los últimos
+ * `maxMensajes` mensajes de cada chat (de los dos lados, en orden) como
+ * contexto, o null si falla la consulta.
+ * Depende de es_propio, que se guarda desde el 16/9/2026: antes de esa fecha no
+ * hay respuestas propias guardadas y todo parecería "sin responder".
+ */
+async function obtenerChatsSinResponder({ dias = 7, horasMin = 3, maxChats = 30, maxMensajes = 8, excluir = [] } = {}) {
+  try {
+    const ahora = Math.floor(Date.now() / 1000);
+    const excl = excluir.filter(Boolean);
+    const candidatos = await dbExecute({
+      sql: `SELECT chat_id, MAX(timestamp) AS ts_ult,
+                   MAX(CASE WHEN es_propio = 1 THEN timestamp END) AS ts_propio
+            FROM mensajes
+            WHERE (chat_id LIKE '%@s.whatsapp.net' OR chat_id LIKE '%@lid')
+              ${excl.length ? `AND chat_id NOT IN (${excl.map(() => '?').join(', ')})` : ''}
+            GROUP BY chat_id
+            HAVING ts_ult >= ? AND ts_ult <= ? AND (ts_propio IS NULL OR ts_propio < ts_ult)
+            ORDER BY ts_ult DESC
+            LIMIT ?`,
+      args: [...excl, ahora - dias * 86400, ahora - horasMin * 3600, maxChats],
+    }, 'chatsSinResponder');
+    if (!candidatos.rows.length) return [];
+
+    const ids = candidatos.rows.map((r) => r.chat_id);
+    const mensajes = await dbExecute({
+      sql: `SELECT chat_id, chat_nombre, remitente, es_propio, cuerpo, timestamp FROM (
+              SELECT chat_id, chat_nombre, remitente, es_propio, cuerpo, timestamp,
+                     ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY timestamp DESC, id DESC) AS pos
+              FROM mensajes WHERE chat_id IN (${ids.map(() => '?').join(', ')})
+            ) WHERE pos <= ? ORDER BY timestamp ASC`,
+      args: [...ids, maxMensajes],
+    }, 'chatsSinResponder-mensajes');
+
+    const porChat = new Map(candidatos.rows.map((r) => [r.chat_id, { chat_id: r.chat_id, ts_ult: Number(r.ts_ult), mensajes: [] }]));
+    for (const m of mensajes.rows) porChat.get(m.chat_id)?.mensajes.push(m);
+    return [...porChat.values()];
+  } catch (err) {
+    console.error(`[DB] Error buscando chats sin responder:`, err.message);
+    return null;
+  }
+}
+
 async function marcarProcesados(ids) {
   if (!ids.length) return;
   try {
@@ -424,6 +471,7 @@ module.exports = {
   guardarMensaje,
   obtenerMensajesSinProcesar,
   obtenerMensajesDesde,
+  obtenerChatsSinResponder,
   marcarProcesados,
   useTursoAuthState,
   limpiarAuth,

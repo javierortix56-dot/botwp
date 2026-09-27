@@ -28,5 +28,11 @@
   },
   "vision": {
     "describir_imagenes": true
+  },
+  "sin_responder": {
+    "activado": true,
+    "dias": 7,
+    "horas_minimas": 3,
+    "max_chats": 30
   }
 }
