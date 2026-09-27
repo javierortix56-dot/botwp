@@ -28,6 +28,7 @@ const {
   conectar,
   obtenerMensajesSinProcesar,
   obtenerMensajesDesde,
+  obtenerChatsSinResponder,
   marcarProcesados,
   guardarMensaje,
   limpiarAuth,
@@ -44,7 +45,7 @@ const {
   desconectar: desconectarWA,
   esperarSincronizacion,
 } = require('./whatsapp');
-const { analizarChat, analizarIndividuales, generarTitular } = require('./gemini');
+const { analizarChat, analizarIndividuales, generarTitular, filtrarSinResponder } = require('./gemini');
 const { recargar: recargarFiltros } = require('./filtros');
 
 let config = require('./config.json');
@@ -206,7 +207,7 @@ function extraerAccionables(resumenesChats, resIndiv, contactos) {
  *  - "👥 De los grupos": info útil, máximo 3 ítems por grupo para no hacer ruido
  */
 function formatearDigest(accionables, resumenesChats, meta = {}) {
-  const { etiqueta, totalMensajes = 0, titular = '' } = meta;
+  const { etiqueta, totalMensajes = 0, titular = '', seccionSinResponder = '' } = meta;
   const { pendientes, agenda } = accionables;
 
   const nombre = (config.nombre_dueno || '').trim();
@@ -227,8 +228,15 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
     ordenados.forEach((p) => {
       out.push(`${p.emoji} ${urgencia(p.fecha).tag}${p.texto} _(${p.origen})_`);
     });
+  } else if (seccionSinResponder) {
+    out.push('✅ Nada nuevo, salvo los chats sin responder de abajo.');
   } else {
     out.push('✅ Nada pendiente — no te piden nada por ahora.');
+  }
+
+  if (seccionSinResponder) {
+    out.push('');
+    out.push(seccionSinResponder);
   }
 
   if (agenda.length) {
@@ -284,6 +292,80 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
   out.push(`_${totalMensajes} mensajes revisados_`);
 
   return out.join('\n').trim();
+}
+
+// "hace 5 h" / "hace 1 día" / "hace 3 días"
+function haceCuanto(ts) {
+  const horas = Math.floor((Date.now() / 1000 - ts) / 3600);
+  if (horas < 24) return `hace ${Math.max(horas, 1)} h`;
+  const dias = Math.floor(horas / 24);
+  return dias === 1 ? 'hace 1 día' : `hace ${dias} días`;
+}
+
+function recortar(texto, max = 80) {
+  const t = String(texto || '').replace(/\s+/g, ' ').trim();
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+/**
+ * Chats individuales donde te escribieron y no respondiste (config.sin_responder).
+ * Se calcula en cada digest sin marcar nada: un chat sigue apareciendo hasta que
+ * JO contesta. Gemini descarta los que no esperan respuesta ("gracias", avisos
+ * automáticos, etc.). Si Gemini falla, se muestran todos avisando, en vez de
+ * callar. Devuelve { items: [{ nombre, texto, ts }], sinFiltro, error }.
+ */
+async function revisarSinResponder({ forzar = false } = {}) {
+  const cfg = config.sin_responder || {};
+  if (cfg.activado === false && !forzar) return { items: [] };
+  const propio = (process.env.MY_WHATSAPP_ID || '').replace('@c.us', '@s.whatsapp.net');
+  const candidatos = await obtenerChatsSinResponder({
+    dias: cfg.dias ?? 7,
+    horasMin: cfg.horas_minimas ?? 3,
+    maxChats: cfg.max_chats ?? 30,
+    excluir: [propio],
+  });
+  if (candidatos === null) return { items: [], error: true };
+  if (!candidatos.length) {
+    console.log(`[Sin responder] No hay chats individuales sin respuesta`);
+    return { items: [] };
+  }
+
+  const contactos = await obtenerContactos().catch(() => new Map());
+  const chats = candidatos.map((c) => {
+    const ultimoAjeno = [...c.mensajes].reverse().find((m) => !m.es_propio);
+    return {
+      chatId: c.chat_id,
+      nombre: contactos.get(c.chat_id) || ultimoAjeno?.remitente || resolverNombreIndiv(c.chat_id, contactos),
+      mensajes: c.mensajes,
+      ts: c.ts_ult,
+      ultimo: ultimoAjeno?.cuerpo || '',
+    };
+  });
+
+  const filtrados = await filtrarSinResponder(chats);
+  let items;
+  let sinFiltro = false;
+  if (filtrados === null) {
+    sinFiltro = true;
+    items = chats.map((c) => ({ nombre: c.nombre, texto: `"${recortar(c.ultimo)}"`, ts: c.ts }));
+  } else {
+    const porId = new Map(chats.map((c) => [c.chatId, c]));
+    items = filtrados.map((f) => {
+      const c = porId.get(f.chatId);
+      return { nombre: c.nombre, texto: f.que_piden || `"${recortar(c.ultimo)}"`, ts: c.ts };
+    });
+  }
+  items.sort((a, b) => a.ts - b.ts); // lo que hace más tiempo espera, primero
+  console.log(`[Sin responder] ${chats.length} chats sin respuesta, ${items.length} esperan algo de vos${sinFiltro ? ' (sin filtro: falló Gemini)' : ''}`);
+  return { items, sinFiltro };
+}
+
+function formatearSinResponder({ items = [], sinFiltro = false } = {}) {
+  if (!items.length) return '';
+  const lineas = ['💬 *Te escribieron y no respondiste*'];
+  if (sinFiltro) lineas.push('_(no pude filtrarlos con la IA, te muestro todos)_');
+  items.forEach((i) => lineas.push(`• *${i.nombre}* (${haceCuanto(i.ts)}): ${i.texto}`));
+  return lineas.join('\n');
 }
 
 let estadoWA = 'arrancando';
@@ -540,6 +622,13 @@ function iniciarServidor() {
       return;
     }
 
+    if (req.url === '/sin-responder' && req.method === 'GET') {
+      if (!botOperativo()) { res.end(`<p>El bot no est&#225; conectado.</p>`); return; }
+      enviarSinResponder().catch((err) => console.error(`[Sin responder]`, err.message));
+      res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chats sin responder</title></head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:420px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><div style="font-size:3rem;margin-bottom:16px">&#128172;</div><h2 style="margin:0 0 12px">Revisando chats sin responder...</h2><p style="color:#555">Busco chats individuales de la &#250;ltima semana donde te escribieron y no contestaste.</p><p style="color:#888;font-size:.85rem;margin-top:16px">Recib&#237;s el resultado por WhatsApp en cuanto termine.</p><a href="/" style="display:inline-block;margin-top:24px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none">Volver al inicio</a></div></body></html>`);
+      return;
+    }
+
     if (req.url === '/limpiar-sesion' && req.method === 'GET') {
       try {
         await limpiarAuth();
@@ -638,7 +727,7 @@ function iniciarServidor() {
       const encabezado = estadoWA === 'standby'
         ? `<h2>&#128277; Modo ahorro de notificaciones</h2><p>El bot est&#225; vinculado pero <strong>desconectado a prop&#243;sito</strong> para que las notificaciones lleguen siempre a tu tel&#233;fono.<br>Se conecta solo autom&#225;ticamente en los horarios del resumen o cuando ped&#237;s uno manual.</p>`
         : `<h2>&#9989; WhatsApp conectado</h2><p>El bot est&#225; activo y escuchando mensajes.</p>`;
-      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">${encabezado}<h3 style="margin-top:32px;color:#555">Res&#250;menes por per&#237;odo</h3><p style="color:#888;font-size:.85rem;margin:0 0 12px">Analiza todos los mensajes (le&#237;dos y no le&#237;dos) del per&#237;odo elegido</p><p><a href="/resumen?h=24" style="display:inline-block;margin:6px;padding:10px 24px;background:#27ae60;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 24 horas</a></p><p><a href="/resumen?h=72" style="display:inline-block;margin:6px;padding:10px 24px;background:#16a085;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 72 horas</a></p><p><a href="/resumen?h=168" style="display:inline-block;margin:6px;padding:10px 24px;background:#117a65;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltima semana</a></p><h3 style="margin-top:32px;color:#555">Configuraci&#243;n</h3><p><a href="/configurar" style="display:inline-block;margin:6px;padding:10px 24px;background:#6c3483;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#9881;&#65039; Configurar chats</a></p><p><a href="/reportes" style="display:inline-block;margin:6px;padding:10px 24px;background:#34495e;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128220; Ver reportes enviados</a></p><h3 style="margin-top:32px;color:#555">Mantenimiento</h3><p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p><p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Procesar mensajes nuevos (cron manual)</a></p><p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Revisar historial completo</a></p><p style="margin-top:24px"><a href="/limpiar-sesion" style="display:inline-block;margin:6px;padding:8px 20px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem" onclick="return confirm('Borrar sesi&#243;n?')">Limpiar sesi&#243;n y re-sincronizar</a></p></body></html>`);
+      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">${encabezado}<h3 style="margin-top:32px;color:#555">Res&#250;menes por per&#237;odo</h3><p style="color:#888;font-size:.85rem;margin:0 0 12px">Analiza todos los mensajes (le&#237;dos y no le&#237;dos) del per&#237;odo elegido</p><p><a href="/resumen?h=24" style="display:inline-block;margin:6px;padding:10px 24px;background:#27ae60;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 24 horas</a></p><p><a href="/resumen?h=72" style="display:inline-block;margin:6px;padding:10px 24px;background:#16a085;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 72 horas</a></p><p><a href="/resumen?h=168" style="display:inline-block;margin:6px;padding:10px 24px;background:#117a65;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltima semana</a></p><p><a href="/sin-responder" style="display:inline-block;margin:6px;padding:10px 24px;background:#d35400;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128172; Chats sin responder (&#250;ltima semana)</a></p><h3 style="margin-top:32px;color:#555">Configuraci&#243;n</h3><p><a href="/configurar" style="display:inline-block;margin:6px;padding:10px 24px;background:#6c3483;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#9881;&#65039; Configurar chats</a></p><p><a href="/reportes" style="display:inline-block;margin:6px;padding:10px 24px;background:#34495e;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128220; Ver reportes enviados</a></p><h3 style="margin-top:32px;color:#555">Mantenimiento</h3><p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p><p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Procesar mensajes nuevos (cron manual)</a></p><p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Revisar historial completo</a></p><p style="margin-top:24px"><a href="/limpiar-sesion" style="display:inline-block;margin:6px;padding:8px 20px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem" onclick="return confirm('Borrar sesi&#243;n?')">Limpiar sesi&#243;n y re-sincronizar</a></p></body></html>`);
       return;
     }
 
@@ -685,7 +774,7 @@ function iniciarServidor() {
  * Devuelve { texto, resumenesChats, resIndiv, idsProcesados, totalTemas, meta }.
  * No envía ni marca nada — eso lo deciden los callers (digest vs período).
  */
-async function analizarLote(todos, etiqueta) {
+async function analizarLote(todos, etiqueta, sinResponder = null) {
   const grupales = todos.filter((m) => m.chat_id?.endsWith('@g.us'));
   const individuales = todos.filter((m) => !m.chat_id?.endsWith('@g.us'));
 
@@ -734,12 +823,18 @@ async function analizarLote(todos, etiqueta) {
   const itemsTitular = [
     ...accionables.pendientes.map((p) => `${p.texto} (${p.origen}${p.fecha ? `, fecha ${p.fecha.iso}` : ''})`),
     ...accionables.agenda.map((e) => `${e.texto} (${e.origen}, ${e.fechaRaw || 'sin fecha'})`),
+    ...(sinResponder?.items || []).map((i) => `Sin responder a ${i.nombre}: ${i.texto}`),
   ];
   if (itemsTitular.length) {
     titular = await generarTitular(itemsTitular);
   }
 
-  const meta = { etiqueta, totalMensajes: todos.filter(m => !m.solo_contexto).length, titular };
+  const meta = {
+    etiqueta,
+    totalMensajes: todos.filter(m => !m.solo_contexto).length,
+    titular,
+    seccionSinResponder: formatearSinResponder(sinResponder || {}),
+  };
   const texto = formatearDigest(accionables, resumenesChats, meta);
   const conversaciones = (resIndiv.conversaciones || []).filter(c => c.temas.length);
   const detalleConversaciones = conversaciones.length
@@ -786,6 +881,35 @@ async function resumenPeriodo(horas) {
 }
 
 /**
+ * Revisión a demanda (endpoint /sin-responder): manda por WhatsApp solo la lista
+ * de chats individuales sin responder de los últimos `sin_responder.dias` días.
+ * No marca nada ni toca el digest.
+ */
+async function enviarSinResponder() {
+  const dias = config.sin_responder?.dias ?? 7;
+  console.log(`\n[Sin responder] Revisión manual (últimos ${dias} días)`);
+  try {
+    await conTareaConectada('sin responder', async () => {
+      const r = await revisarSinResponder({ forzar: true });
+      const texto = r.error
+        ? `⚠️ No pude revisar los chats sin responder (falló la base de datos). Probá de nuevo en un rato.`
+        : r.items.length
+          ? `${formatearSinResponder(r)}\n\n_Últimos ${dias} días · chats individuales_`
+          : `✅ No tenés chats individuales sin responder en los últimos ${dias} días.`;
+      try {
+        await enviarTextoLibre(texto);
+      } catch (err) {
+        console.error(`[Sin responder] Error enviando WA:`, err.message);
+      }
+      postNtfy('Chats sin responder', texto.replace(/\*/g, '').replace(/_/g, ''));
+      await guardarReporte('sin_responder', texto, 0, r.items.length);
+    });
+  } catch (err) {
+    console.error(`[Sin responder] Error general:`, err.message);
+  }
+}
+
+/**
  * Digest programado (11:00 y 21:00): barre TODOS los mensajes sin procesar
  * —grupos e individuales juntos—, arma un único mensaje consolidado, lo envía,
  * lo persiste y marca los mensajes como procesados.
@@ -795,24 +919,34 @@ async function generarDigest(etiqueta) {
   console.log(`\n[Digest${etiqueta ? ' ' + etiqueta : ''}] Iniciando — ${hora}`);
   try {
     await conTareaConectada(`digest${etiqueta ? ' ' + etiqueta : ''}`, async () => {
+      // Chats donde te escribieron y no respondiste: se revisan SIEMPRE, aunque no
+      // haya mensajes nuevos, porque justo esos chats quedan en silencio.
+      const sinResp = await revisarSinResponder().catch((err) => {
+        console.error(`[Digest] Error revisando chats sin responder:`, err.message);
+        return { items: [] };
+      });
+      const seccionSinResp = formatearSinResponder(sinResp);
+
       const todos = await obtenerMensajesSinProcesar();
       if (!todos.length) {
         // Mensaje corto igual: JO sabe que el bot está vivo y no se perdió nada
-        console.log(`[Digest] Sin mensajes pendientes — enviando "todo tranquilo"`);
-        const txt = `✅ *Todo tranquilo* — no hubo mensajes nuevos desde el último resumen.`;
+        console.log(`[Digest] Sin mensajes nuevos — enviando mensaje corto${seccionSinResp ? ' con chats sin responder' : ' "todo tranquilo"'}`);
+        const txt = seccionSinResp
+          ? `📭 No hubo mensajes nuevos desde el último resumen.\n\n${seccionSinResp}`
+          : `✅ *Todo tranquilo* — no hubo mensajes nuevos desde el último resumen.`;
         // ntfy SIEMPRE, aunque no haya nada: antes este camino hacía return sin
         // notificar y ntfy quedaba mudo justo cuando WA fallaba en descifrar.
-        postNtfy(`Resumen ${etiqueta || ''}`.trim() || 'Resumen', txt.replace(/\*/g, ''));
+        postNtfy(`Resumen ${etiqueta || ''}`.trim() || 'Resumen', txt.replace(/\*/g, '').replace(/_/g, ''));
         try {
           const ok = await enviarTextoLibre(txt);
-          if (ok) await guardarReporte('digest', txt, 0, 0);
+          if (ok) await guardarReporte('digest', txt, 0, sinResp.items.length);
         } catch (err) {
           console.error(`[Digest] No se pudo enviar (WA no conectado):`, err.message);
         }
         return;
       }
 
-      let { texto, idsProcesados, totalTemas, erroresAnalisis } = await analizarLote(todos, etiqueta);
+      let { texto, idsProcesados, totalTemas, erroresAnalisis } = await analizarLote(todos, etiqueta, sinResp);
 
       // Hubo mensajes pero nada relevante: mensaje corto en vez del esqueleto del digest.
       // Si además hubo errores de análisis, decirlo — antes un fallo total de Gemini
@@ -820,7 +954,10 @@ async function generarDigest(etiqueta) {
       if (totalTemas === 0) {
         texto = erroresAnalisis > 0
           ? `⚠️ *Ojo* — había ${todos.length} mensajes nuevos pero falló el análisis (${erroresAnalisis} error/es con Gemini). Lo pendiente se reintenta en el próximo resumen.`
-          : `✅ *Todo tranquilo* — revisé ${todos.length} mensajes y no hay nada pendiente para vos. Solo charla.`;
+          : seccionSinResp
+            ? `✅ Revisé ${todos.length} mensajes nuevos y no hay novedades para vos.`
+            : `✅ *Todo tranquilo* — revisé ${todos.length} mensajes y no hay nada pendiente para vos. Solo charla.`;
+        if (seccionSinResp) texto += `\n\n${seccionSinResp}`;
       }
 
       let enviado = false;
