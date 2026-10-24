@@ -7,7 +7,7 @@ const { DatabaseSync } = require('node:sqlite');
 
 const { analizarConversacion } = require('../analisis');
 const { obtenerOpcionesGrupo, detalleDefecto, buscarIntereses } = require('../filtros');
-const { seccionGrupos, seccionConversaciones, formatearIntereses, formatearDetalle, htmlDesdeTexto, resaltarPrecios, marcaFecha, sinRelleno, iconoRubro, MAX_INTERESES_WA } = require('../formato');
+const { avisoNtfy, seccionGrupos, seccionConversaciones, formatearIntereses, formatearDetalle, htmlDesdeTexto, resaltarPrecios, marcaFecha, sinRelleno, iconoRubro, MAX_INTERESES_WA } = require('../formato');
 
 const config = { nombre_dueno: 'JO', max_mensajes_por_batch: 25 };
 const mensaje = (id, extra = {}) => ({ id, chat_id: 'g@g.us', remitente: 'Cintia', cuerpo: 'Vendo bici', timestamp: 1789470000 + id, ...extra });
@@ -429,4 +429,38 @@ test('guardarReporte devuelve el id y obtenerReporte lo recupera', async () => {
   } finally {
     Module._load = original;
   }
+});
+
+// ── Aviso corto para ntfy ───────────────────────────────────────────────────
+test('avisoNtfy: titular, lo más urgente y conteos, sin pared de texto', () => {
+  const a = avisoNtfy({
+    titular: 'Hoy hay que firmar la autorización de la excursión.',
+    pendientes: 5, urgentes: 1,
+    pendientesTop: ['🔴 ⚠️ HOY — Firmar la autorización (5° GRADO)', '🔴 Pagar la cuota (SX Papis)', '🔴 Confirmar asistencia (Carmen)'],
+    gruposConNovedades: 3, nSinResponder: 2, nIntereses: 1,
+  }, { hora: '11:00' });
+  assert.equal(a.titulo, '🚨 Resumen de las 11:00 · 5 para resolver');
+  assert.equal(a.cuerpo.split('\n')[0], 'Hoy hay que firmar la autorización de la excursión.');
+  assert.match(a.cuerpo, /🔴 ⚠️ HOY — Firmar la autorización \(5° GRADO\)/);
+  assert.match(a.cuerpo, /…y 2 más en el panel/);
+  assert.match(a.cuerpo, /📢 3 grupos con novedades · 💬 2 sin responder · 🔔 1 de tus intereses/);
+  assert.ok(a.cuerpo.length < 500, 'es un aviso, no el resumen entero');
+});
+
+test('avisoNtfy: sin pendientes es un aviso tranquilo; con etiqueta usa la etiqueta', () => {
+  assert.deepEqual(avisoNtfy({}, { hora: '21:00' }), { titulo: '✅ Resumen de las 21:00', cuerpo: 'Todo tranquilo: nada pendiente para vos.' });
+  const p = avisoNtfy({ pendientes: 1, pendientesTop: ['🔴 Algo (X)'], gruposConNovedades: 1 }, { etiqueta: 'últimas 24h' });
+  assert.equal(p.titulo, '📌 Resumen últimas 24h · 1 para resolver');
+  assert.match(p.cuerpo, /📢 1 grupo con novedades/);
+});
+
+test('el resumen se ve como una tarjeta por sección, con el encabezado destacado', () => {
+  const panel = require('../panel');
+  const html = panel.paginaReporte({ id: 1, tipo: 'digest', creado_en: 1789470000 }, ['<b>Buen día</b>', '📌 Para resolver', '📢 Novedades']);
+  assert.equal((html.match(/class="card contenido/g) || []).length, 3);
+  assert.equal((html.match(/class="card contenido cabecera"/g) || []).length, 1);
+  assert.match(panel.paginaReporte({ id: 1, tipo: 'digest', creado_en: 1789470000 }, 'texto suelto'), /class="card contenido">texto suelto/);
+  const conPie = panel.paginaReporte({ id: 1, tipo: 'digest', creado_en: 1789470000 }, ['<b>Hola</b>', 'Algo', '<i>36 mensajes revisados</i>']);
+  assert.equal((conPie.match(/class="card contenido/g) || []).length, 2, 'el pie no es una tarjeta');
+  assert.match(conPie, /<p class="sub centro"[^>]*><i>36 mensajes revisados<\/i><\/p>/);
 });

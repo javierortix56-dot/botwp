@@ -53,6 +53,7 @@ h2{font-size:.78rem;letter-spacing:.06em;text-transform:uppercase;color:var(--su
 .centro{text-align:center}
 .icono{font-size:2.6rem;line-height:1;margin-bottom:10px}
 .contenido{white-space:pre-wrap;word-break:break-word;line-height:1.55}
+.cabecera{background:var(--verde2);border-color:transparent;font-size:1.02rem}
 label{display:block;font-weight:600;margin:0 0 6px}
 input[type=text],textarea,select{width:100%;padding:10px 12px;border:1px solid var(--borde);border-radius:10px;background:var(--bg);color:var(--txt);font:inherit}
 textarea{min-height:64px}
@@ -105,7 +106,7 @@ function paginaInicio(e) {
   <div class="estado"><span class="punto ${colorEstado}"></span>${escapar(tituloEstado)}</div>
   <p class="sub" style="margin-top:4px">${escapar(detalleEstado)}</p>
   <div class="grid">
-    <div class="dato"><span>Último resumen</span><b>${escapar(e.ultimoDigest?.hace || '—')}</b><span>${escapar(e.ultimoDigest?.cuando || 'todavía no hubo')}</span></div>
+    ${e.ultimoDigest?.id ? `<a class="dato" href="/reporte?id=${escapar(e.ultimoDigest.id)}" style="color:inherit">` : '<div class="dato">'}<span>Último resumen</span><b>${escapar(e.ultimoDigest?.hace || '—')}</b><span>${escapar(e.ultimoDigest?.id ? 'tocá para verlo ›' : (e.ultimoDigest?.cuando || 'todavía no hubo'))}</span>${e.ultimoDigest?.id ? '</a>' : '</div>'}
     <div class="dato"><span>Próximo resumen</span><b>${escapar(e.proximoDigest || '—')}</b><span>automático</span></div>
     <div class="dato"><span>Mensajes en espera</span><b>${e.pendientes == null ? '—' : escapar(e.pendientes)}</b><span>entran en el próximo</span></div>
     <div class="dato"><span>Gemini hoy (gratis)</span><b>${escapar(g.total)} <small style="font-weight:400;color:var(--sub)">/ ${escapar(g.limite)}</small></b><div class="barra"><i class="${colorBarra}" style="width:${pct}%"></i></div></div>
@@ -171,12 +172,23 @@ function paginaReportes(reportes, { tz = 'America/Argentina/Buenos_Aires' } = {}
   });
 }
 
-function paginaReporte(r, htmlContenido, { tz = 'America/Argentina/Buenos_Aires' } = {}) {
+/**
+ * Un resumen como tarjetas, una por sección. `bloques` es la lista de HTML ya
+ * formateado (el primero es el encabezado con el saludo); un string suelto se
+ * muestra en una sola tarjeta.
+ */
+function paginaReporte(r, bloques, { tz = 'America/Argentina/Buenos_Aires' } = {}) {
   const [nombre] = NOMBRES_TIPO[r.tipo] || [r.tipo || 'Reporte'];
+  let lista = (Array.isArray(bloques) ? bloques : [bloques]).filter(Boolean);
+  // "N mensajes revisados" va como línea chica al pie, no como tarjeta propia.
+  const pie = lista.length > 1 && /mensajes revisados/.test(lista.at(-1)) && lista.at(-1).length < 80 ? lista.at(-1) : '';
+  if (pie) lista = lista.slice(0, -1);
+  const tarjetas = lista.map((b, i) => `<div class="card contenido${i === 0 && lista.length > 1 ? ' cabecera' : ''}">${b}</div>`).join('')
+    + (pie ? `<p class="sub centro" style="margin-top:12px;font-size:.85rem">${pie}</p>` : '');
   return layout({
     titulo: nombre,
     volver: '/reportes',
-    cuerpo: `<p class="sub">${escapar(fechaCorta(r.creado_en, tz))} · ${escapar(nombre)}</p><div class="card contenido" style="margin-top:8px">${htmlContenido}</div>`,
+    cuerpo: `<p class="sub">${escapar(fechaCorta(r.creado_en, tz))} · ${escapar(nombre)}</p><div style="margin-top:8px">${tarjetas}</div>`,
   });
 }
 
