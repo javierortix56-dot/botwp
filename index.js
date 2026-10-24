@@ -208,7 +208,7 @@ function extraerAccionables(resumenesChats, resIndiv, contactos) {
  *  - "👥 De los grupos": info útil, máximo 3 ítems por grupo para no hacer ruido
  */
 function formatearDigest(accionables, resumenesChats, meta = {}) {
-  const { etiqueta, totalMensajes = 0, titular = '', seccionSinResponder = '', seccionIntereses = '' } = meta;
+  const { etiqueta, totalMensajes = 0, titular = '', seccionSinResponder = '', seccionIntereses = '', seccionConversaciones: convs = '' } = meta;
   const { pendientes, agenda } = accionables;
 
   const nombre = (config.nombre_dueno || '').trim();
@@ -222,7 +222,7 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
   const out = [`${saludo}${nombre ? `, ${nombre}` : ''}* — ${fecha} ${hora}${etiqueta ? ` · ${etiqueta}` : ''}`];
   if (titular) out.push(`_${titular}_`);
 
-  out.push('');
+  out.push('', SEPARADOR);
   out.push('📌 *Para resolver*');
   if (pendientes.length) {
     const ordenados = [...pendientes].sort((a, b) => urgencia(a.fecha).peso - urgencia(b.fecha).peso);
@@ -236,12 +236,12 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
   }
 
   if (seccionSinResponder) {
-    out.push('');
+    out.push('', SEPARADOR);
     out.push(seccionSinResponder);
   }
 
   if (seccionIntereses) {
-    out.push('');
+    out.push('', SEPARADOR);
     out.push(seccionIntereses);
   }
 
@@ -251,7 +251,7 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
       const kb = b.fecha ? `${b.fecha.iso} ${b.fecha.hora || ''}` : '9999';
       return ka.localeCompare(kb);
     });
-    out.push('');
+    out.push('', SEPARADOR);
     out.push('📅 *Se viene*');
     ordenada.forEach((e) => {
       const cuando = e.fecha ? fechaLegible(e.fecha) : (e.fechaRaw || 's/f');
@@ -265,13 +265,18 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
   // Novedades de los grupos (versión resumida; la completa va al detalle web)
   const grupos = seccionGrupos(resumenesChats);
   if (grupos.texto) {
-    out.push('');
+    out.push('', SEPARADOR);
     out.push('📢 *Novedades de tus grupos*');
     out.push('');
     out.push(grupos.texto);
   }
 
-  out.push('');
+  if (convs) {
+    out.push('', SEPARADOR);
+    out.push(convs);
+  }
+
+  out.push('', SEPARADOR);
   out.push(`_${totalMensajes} mensajes revisados_`);
 
   return out.join('\n').trim();
@@ -279,12 +284,13 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
 
 // Formato de la sección de grupos, intereses y detalle: ver formato.js
 const formato = require('./formato');
-const { MAX_INTERESES_WA, formatearIntereses, htmlDesdeTexto } = formato;
+const { MAX_INTERESES_WA, SEPARADOR, formatearIntereses, htmlDesdeTexto } = formato;
 const seccionGrupos = (resumenesChats, opciones) => formato.seccionGrupos(resumenesChats, { ...opciones, limites: config.resumen });
-const formatearDetalle = (resumenesChats, coincidencias, etiqueta) => formato.formatearDetalle(resumenesChats, coincidencias, etiqueta, config.resumen);
+const seccionConversaciones = (conversaciones, opciones) => formato.seccionConversaciones(conversaciones, { ...opciones, limites: config.resumen });
+const formatearDetalle = (resumenesChats, coincidencias, etiqueta, conversaciones) => formato.formatearDetalle(resumenesChats, coincidencias, etiqueta, config.resumen, conversaciones);
 
 function urlPublica() {
-  return (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://botwp-ikbb.onrender.com').replace(/\/$/, '');
+  return (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://botwp-nivv.onrender.com').replace(/\/$/, '');
 }
 
 /**
@@ -884,27 +890,28 @@ async function analizarLote(todos, etiqueta, sinResponder = null) {
   }
 
   const coincidencias = buscarIntereses(todos, config.resumen?.intereses);
+  const conversaciones = resIndiv.conversaciones || [];
+  const convs = seccionConversaciones(conversaciones);
   const meta = {
     etiqueta,
     totalMensajes: todos.filter(m => !m.solo_contexto).length,
     titular,
     seccionSinResponder: formatearSinResponder(sinResponder || {}),
     seccionIntereses: formatearIntereses(coincidencias),
+    seccionConversaciones: convs.texto,
   };
   const texto = formatearDigest(accionables, resumenesChats, meta);
-  const conversaciones = (resIndiv.conversaciones || []).filter(c => c.temas.length);
-  const detalleConversaciones = conversaciones.length
-    ? '\n\n💬 *Tus conversaciones*\n' + conversaciones.map(c => `*${c.chatNombre}*\n${c.temas.slice(0, config.resumen?.max_temas_conversacion ?? 8).map(t => '• ' + t.resumen).join('\n')}`).join('\n\n')
-    : '';
+  // Saludos y charla de cortesía (relevancia 1) de las conversaciones no cuentan:
+  // un digest solo con eso sale como "todo tranquilo".
   const totalTemas = resumenesChats.reduce((a, r) => a + r.temas.length, 0)
-    + conversaciones.reduce((n, c) => n + c.temas.length, 0)
+    + conversaciones.reduce((n, c) => n + (c.temas || []).filter((t) => t.relevancia >= 2).length, 0)
     + coincidencias.length;
 
   // Detalle completo (página web): solo si el resumen de WhatsApp dejó cosas afuera.
-  const necesitaDetalle = seccionGrupos(resumenesChats).ocultos > 0 || coincidencias.length > MAX_INTERESES_WA;
-  const detalle = necesitaDetalle ? formatearDetalle(resumenesChats, coincidencias, etiqueta) : null;
+  const necesitaDetalle = seccionGrupos(resumenesChats).ocultos > 0 || convs.ocultos > 0 || coincidencias.length > MAX_INTERESES_WA;
+  const detalle = necesitaDetalle ? formatearDetalle(resumenesChats, coincidencias, etiqueta, conversaciones) : null;
 
-  return { texto: texto + detalleConversaciones, idsProcesados, totalTemas, meta, erroresAnalisis, detalle };
+  return { texto, idsProcesados, totalTemas, meta, erroresAnalisis, detalle };
 }
 
 /**
@@ -1076,7 +1083,7 @@ async function main() {
   }
   try {
     await iniciarCliente({
-      onQR: (qr) => { estadoWA = 'qr'; qrActual = qr; tsAutenticando = null; console.log(`[WA] QR listo — abrí https://botwp-ikbb.onrender.com para escanearlo`); },
+      onQR: (qr) => { estadoWA = 'qr'; qrActual = qr; tsAutenticando = null; console.log(`[WA] QR listo — abrí ${urlPublica()} para escanearlo`); },
       onAutenticando: () => { estadoWA = 'autenticando'; qrActual = null; tsAutenticando = Date.now(); console.log(`[WA] QR escaneado — autenticando...`); },
       onListo: () => {
         const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : '?';
