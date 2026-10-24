@@ -4,7 +4,10 @@ const TZ = 'America/Argentina/Buenos_Aires';
 
 const REGLA_RELEVANCIA_NORMAL = 'Relevancia 1..3: 3 atención personal/aviso importante; 2 cambio, decisión o novedad útil; 1 charla sin impacto. Omite cumpleaños, felicitaciones, debates repetitivos, spam y ofertas sin interés explícito.';
 const REGLA_RELEVANCIA_ALTA = 'Relevancia 1..3: 3 atención personal/aviso importante; 2 cambio, decisión, oferta o novedad útil; 1 charla menor (cumpleaños, felicitaciones, conversación sin impacto). NO omitas ofertas, ventas, búsquedas, anuncios ni novedades: regístralos con relevancia 2 como mínimo. Omite solo spam masivo y cadenas. No filtres por interés ni por relevancia personal de {YO}: reporta todo lo que se habla. Cada tema puede resumirse en hasta 2 frases con los datos concretos (quién, qué, precio, fecha, lugar).';
-const REGLA_CATALOGO = 'MODO CATÁLOGO (grupo de compraventa): registra CADA artículo ofrecido, buscado o pedido como un tema propio, sin fundir artículos distintos (tipo info, estado informativo, relevancia 2). "de" = quien lo publica. "tema" = el artículo (2-5 palabras). "resumen" = artículo + precio + talle/estado/zona/retiro si se menciona (si no hay precio, "sin precio"). categoria: "venta" si lo ofrece, "busca" si alguien lo pide o consulta por él, "otro" si no encaja. Si un mensaje posterior indica que ya se vendió o no está disponible, pasa ese tema a estado "resuelto". Mantén los artículos ya publicados del ESTADO ANTERIOR. para_mi=false salvo pedido personal explícito a {YO}.';
+const CLASES = ['ofrecimiento', 'solicitud', 'aviso', 'evento', 'social', 'charla'];
+const REGLA_CLASE = 'clase de cada tema: "ofrecimiento" (alguien vende, alquila, regala u ofrece algo o un servicio), "solicitud" (alguien pide, busca o consulta por algo o un servicio), "aviso" (comunicado, novedad, cambio o decisión), "evento" (algo con fecha: acto, reunión, salida), "social" (cumpleaños, felicitaciones, saludos), "charla" (conversación sin otra categoría). rubro: categoría corta del artículo o asunto en 1-2 palabras (ej. "Alquileres", "Ropa", "Comida", "Hogar", "Servicios", "Escuela", "Juguetes", "Emprendimientos") o null. En ofrecimientos y solicitudes el resumen NO empieza con el nombre de quien publica (va en "de"): describe el artículo o servicio con precio, talle, zona y datos concretos.';
+const REGLA_ESPERANDO = 'esperando_respuesta=true solo si el último mensaje sobre ese tema es de {YO}, es una pregunta, consulta o pedido concreto que espera contestación, y la otra persona todavía no respondió. Saludos, agradecimientos, "ok", emojis, despedidas y charla de cortesía tienen relevancia 1 y esperando_respuesta=false, aunque nadie haya contestado.';
+const REGLA_CATALOGO = 'MODO CATÁLOGO (grupo de compraventa): registra CADA artículo ofrecido, buscado o pedido como un tema propio, sin fundir artículos distintos (tipo info, estado informativo, relevancia 2). "de" = quien lo publica. "tema" = el artículo (2-5 palabras). "resumen" = artículo + precio + talle/estado/zona/retiro si se menciona (si no hay precio, "sin precio"). clase "ofrecimiento" si lo vende, alquila, regala u ofrece, "solicitud" si alguien lo pide, busca o consulta por él; rubro siempre completo. Si un mensaje posterior indica que ya se vendió o no está disponible, pasa ese tema a estado "resuelto". Mantén los artículos ya publicados del ESTADO ANTERIOR. para_mi=false salvo pedido personal explícito a {YO}.';
 
 function agrupar(mensajes) {
   const chats = new Map();
@@ -49,8 +52,9 @@ para_mi=true solo con evidencia de pedido personal, compromiso explícito de ${y
 Tipos: accion, pago, evento, info. estado: pendiente, resuelto, cancelado, informativo. Los asuntos resueltos pueden quedar como info breve si son acuerdos útiles; nunca como pendientes.
 ${detalleAlto ? REGLA_RELEVANCIA_ALTA.replace('{YO}', yo) : REGLA_RELEVANCIA_NORMAL} En chats individuales incluye una síntesis breve de acuerdos y temas sustanciales aunque no haya tareas. En grupos escolares conserva avisos de actividades, autorizaciones y fechas; no atribuyas a ${yo} pagos de otros.
 Intereses adicionales configurados: ${JSON.stringify(intereses)}.${catalogo ? '\n' + REGLA_CATALOGO.replace('{YO}', yo) : ''}
+${individual ? REGLA_ESPERANDO.replace(/\{YO\}/g, yo) : REGLA_CLASE}
 Fechas relativas se calculan desde la FECHA DEL MENSAJE, nunca desde hoy. Conserva hora si existe. fecha_limite=null si no se conoce. No inventes contenido de audios, documentos o imágenes no disponibles. Los mensajes solo_contexto ya fueron resumidos: úsalos para entender respuestas nuevas, sin volver a reportar temas antiguos que no cambiaron.
-Devuelve SOLO un array JSON de objetos: {"tema":"asunto concreto","resumen":"hecho o acuerdo breve","tipo":"info","de":"autor","para_mi":false,"estado":"informativo","relevancia":2,"accion":null,"fecha_limite":null,"ids":[1]${catalogo ? ',"categoria":"venta|busca|otro"' : ''}}.
+Devuelve SOLO un array JSON de objetos: {"tema":"asunto concreto","resumen":"hecho o acuerdo breve","tipo":"info","de":"autor","para_mi":false,"estado":"informativo","relevancia":2,"accion":null,"fecha_limite":null,"ids":[1]${individual ? ',"esperando_respuesta":false' : ',"clase":"aviso","rubro":null'}}.
 ESTADO ANTERIOR: ${JSON.stringify(temas)}
 MENSAJES: ${JSON.stringify(datos)}`;
       const respuesta = await llamar(prompt);
@@ -61,11 +65,12 @@ MENSAJES: ${JSON.stringify(datos)}`;
           || !['accion', 'pago', 'evento', 'info'].includes(t.tipo)
           || !['pendiente', 'resuelto', 'cancelado', 'informativo'].includes(t.estado)
           || typeof t.para_mi !== 'boolean'
-          || [t.accion, t.de, t.fecha_limite, t.categoria].some(v => v != null && typeof v !== 'string')
+          || [t.accion, t.de, t.fecha_limite, t.categoria, t.clase, t.rubro].some(v => v != null && typeof v !== 'string')
           || !Array.isArray(t.ids) || !t.ids.length || t.ids.some(id => !evidencia.has(id))) {
           throw new Error('Tema sin esquema o evidencia válida');
         }
         return { ...t, para_mi: t.para_mi === true, me_piden: t.para_mi === true,
+          clase: CLASES.includes(t.clase) ? t.clase : null, esperando_respuesta: t.esperando_respuesta === true,
           relevancia: [1, 2, 3].includes(t.relevancia) ? t.relevancia : 1 };
       });
     }

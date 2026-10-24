@@ -71,7 +71,7 @@ async function analizarIndividuales(mensajes, contactos = new Map(), opciones = 
     const r = await analizarConversacion(nombre, lista, callGemini, config, true, opciones);
     salida.idsProcesados.push(...r.idsProcesados);
     salida.errores += r.errores;
-    salida.conversaciones.push({ chatNombre: nombre, temas: r.temas });
+    salida.conversaciones.push({ chatNombre: nombre, temas: r.temas, menores: r.menores || [] });
     for (const t of r.temas) {
       if (!t.para_mi || t.estado !== 'pendiente') continue;
       if (t.tipo === 'evento') salida.eventos.push({ titulo: t.resumen, fecha: t.fecha_limite, chat: nombre });

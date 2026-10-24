@@ -28,7 +28,7 @@ agregar('e@g.us', '5° GRADO MIXTO', 'Seño', 'Mañana acto a las 9');
 agregar('p@s.whatsapp.net', 'Pedro', 'Pedro', 'Hola, venís el sábado?');
 
 const capturas = { opciones: {}, enviados: [], reportes: [], procesados: null };
-const item = (n, extra = {}) => ({ tema: `Art ${n}`, resumen: `Artículo ${n}, $${n}.000`, tipo: 'info', estado: 'informativo', relevancia: 2, para_mi: false, de: n % 2 ? 'Cintia' : 'Marta', ids: [1], categoria: 'venta', ...extra });
+const item = (n, extra = {}) => ({ tema: `Art ${n}`, resumen: `Artículo ${n}, $${n}.000`, tipo: 'info', estado: 'informativo', relevancia: 2, para_mi: false, de: n % 2 ? 'Cintia' : 'Marta', ids: [1], clase: 'ofrecimiento', rubro: n % 2 ? 'Ropa' : 'Hogar', ...extra });
 const stubs = {
   dotenv: { config() {} },
   'node-cron': { schedule() {} },
@@ -62,7 +62,7 @@ const stubs = {
       if (nombre === NOMBRE_ROPERITO) return { temas: Array.from({ length: 24 }, (_, i) => item(i + 1)), menores: [], idsProcesados: msgs.map((m) => m.id), errores: 0 };
       return { temas: [item(1, { tema: 'Acto', resumen: 'Acto escolar mañana a las 9', de: 'Seño' })], menores: [{ ...item(2), relevancia: 1, resumen: 'Saludos varios' }], idsProcesados: msgs.map((m) => m.id), errores: 0 };
     },
-    analizarIndividuales: async (msgs, _contactos, opciones) => { capturas.opcionesIndividuales = opciones; return { eventos: [], compromisos: [], pedidos: [], conversaciones: [], idsProcesados: msgs.map((m) => m.id), errores: 0 }; },
+    analizarIndividuales: async (msgs, _contactos, opciones) => { capturas.opcionesIndividuales = opciones; return { eventos: [], compromisos: [], pedidos: [], conversaciones: [{ chatNombre: 'Pedro', temas: [{ ...item(1), clase: null, rubro: null, resumen: 'Preguntaste si viene el sábado', esperando_respuesta: true }, { ...item(2), clase: null, rubro: null, relevancia: 1, resumen: 'Te saludó' }], menores: [] }], idsProcesados: msgs.map((m) => m.id), errores: 0 }; },
     generarTitular: async () => 'Hay novedades en los grupos.',
     filtrarSinResponder: async () => [],
   },
@@ -88,7 +88,7 @@ function llamar(url, method = 'GET', cuerpo = null) {
   return hecho.then(() => res);
 }
 
-test('el digest manda catálogo por vendedor, intereses y un link al detalle completo', async () => {
+test('el digest manda catálogo por clase y rubro, conversaciones, intereses y un link al detalle completo', async () => {
   await new Promise((r) => setTimeout(r, 50)); // main(): estado conectado
   await llamar('/procesar');
   assert.equal(capturas.enviados.length, 1);
@@ -99,8 +99,10 @@ test('el digest manda catálogo por vendedor, intereses y un link al detalle com
   assert.deepEqual(capturas.opcionesIndividuales, { detalle: 'alto' }, 'los chats individuales también van con detalle alto');
 
   assert.match(texto, /📢 \*Novedades de tus grupos\*/);
-  assert.match(texto, /🛍️ \*Roperito St\. Xavier\.[^*]*\* — 24 publicaciones/);
-  assert.equal((texto.match(/\*Cintia\*/g) || []).length, 1, 'Cintia aparece una sola vez');
+  assert.match(texto, /🛍️ \*Roperito St\. Xavier\.[^*]*\* · 24 publicaciones/);
+  assert.match(texto, /   👕 _Ropa_\n• Artículo 1, \*\$1\.000\* — \*Cintia\*/);
+  assert.match(texto, /   🛋️ _Hogar_\n• Artículo 2, \*\$2\.000\* — \*Marta\*/);
+  assert.equal((texto.match(/ — \*Cintia\*$/gm) || []).length, 10, 'cada artículo lleva su vendedor');
   assert.equal((texto.match(/^• Artículo/gm) || []).length, 20, 'WhatsApp muestra hasta 20 artículos');
   assert.match(texto, /4 publicación\(es\) más en el detalle completo/);
   assert.match(texto, /Acto escolar mañana a las 9/);
@@ -109,11 +111,17 @@ test('el digest manda catálogo por vendedor, intereses y un link al detalle com
   assert.match(texto, /🔔 \*Coincidencias con tus intereses\*/);
   assert.match(texto, /\*cochecito\* — Laura en Roperito/);
 
+  assert.match(texto, /💬 \*Tus conversaciones\*\n\n👤 \*Pedro\*\n• ⏳ _Esperás respuesta:_ Preguntaste si viene el sábado/);
+  assert.doesNotMatch(texto, /Te saludó/);
+  assert.ok(texto.indexOf('Tus conversaciones') < texto.indexOf('mensajes revisados'), 'las conversaciones van antes del pie');
+  assert.ok((texto.match(/━━━━━━━━━━━━━━/g) || []).length >= 4, 'secciones separadas');
+
   assert.match(texto, /🔎 \*Detalle completo de los grupos:\*\nhttps:\/\/bot\.ejemplo\.com\/reporte\?id=41$/);
   const detalle = capturas.reportes.find((r) => r.tipo === 'detalle');
   assert.ok(detalle, 'se guardó el detalle completo');
   assert.equal((detalle.contenido.match(/^• Artículo/gm) || []).length, 24, 'el detalle tiene los 24 artículos');
   assert.match(detalle.contenido, /Saludos varios/);
+  assert.match(detalle.contenido, /◦ Te saludó/, 'el saludo queda en el detalle');
   assert.ok(capturas.reportes.some((r) => r.tipo === 'digest' && r.contenido === texto), 'el digest enviado también se audita');
   assert.deepEqual(capturas.procesados.sort((a, b) => a - b), [1, 2, 3, 4]);
 });

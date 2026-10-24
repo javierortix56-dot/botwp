@@ -7,7 +7,7 @@ const { DatabaseSync } = require('node:sqlite');
 
 const { analizarConversacion } = require('../analisis');
 const { obtenerOpcionesGrupo, detalleDefecto, buscarIntereses } = require('../filtros');
-const { seccionGrupos, formatearIntereses, formatearDetalle, htmlDesdeTexto, MAX_INTERESES_WA } = require('../formato');
+const { seccionGrupos, seccionConversaciones, formatearIntereses, formatearDetalle, htmlDesdeTexto, resaltarPrecios, marcaFecha, MAX_INTERESES_WA } = require('../formato');
 
 const config = { nombre_dueno: 'JO', max_mensajes_por_batch: 25 };
 const mensaje = (id, extra = {}) => ({ id, chat_id: 'g@g.us', remitente: 'Cintia', cuerpo: 'Vendo bici', timestamp: 1789470000 + id, ...extra });
@@ -15,17 +15,39 @@ const tema = (ids, extra = {}) => ({ tema: 'Bici', resumen: 'Bici de nena usada,
 
 // ── analisis: modo y detalle ────────────────────────────────────────────────
 
-test('modo catálogo: el prompt pide un ítem por artículo y acepta categoría', async () => {
+test('modo catálogo: el prompt pide un ítem por artículo con clase y rubro', async () => {
   let prompt = '';
   const r = await analizarConversacion('Roperito', [mensaje(1)], async (p) => {
     prompt = p;
-    return JSON.stringify([tema([1], { categoria: 'venta' })]);
+    return JSON.stringify([tema([1], { clase: 'ofrecimiento', rubro: 'Bicis' })]);
   }, config, false, { modo: 'catalogo', detalle: 'alto' });
   assert.match(prompt, /MODO CATÁLOGO/);
-  assert.match(prompt, /"categoria":"venta\|busca\|otro"/);
+  assert.match(prompt, /"clase":"aviso","rubro":null/);
+  assert.match(prompt, /"ofrecimiento" \(alguien vende/);
   assert.match(prompt, /JO/);
   assert.equal(r.errores, 0);
-  assert.equal(r.temas[0].categoria, 'venta');
+  assert.equal(r.temas[0].clase, 'ofrecimiento');
+  assert.equal(r.temas[0].rubro, 'Bicis');
+});
+
+test('una clase desconocida se descarta sin invalidar el chat; un rubro que no es texto sí lo invalida', async () => {
+  const ok = await analizarConversacion('G', [mensaje(1)], async () => JSON.stringify([tema([1], { clase: 'inventada' })]), config);
+  assert.equal(ok.errores, 0);
+  assert.equal(ok.temas[0].clase, null);
+  const mal = await analizarConversacion('G', [mensaje(1)], async () => JSON.stringify([tema([1], { rubro: 7 })]), config);
+  assert.equal(mal.errores, 1);
+});
+
+test('individuales: el prompt explica esperando_respuesta y que los saludos son relevancia 1', async () => {
+  let prompt = '';
+  const r = await analizarConversacion('Carmen', [mensaje(1, { chat_id: 'c@s.whatsapp.net', es_propio: 1, cuerpo: '¿Se anima tu mamá a viajar?' })], async (p) => {
+    prompt = p;
+    return JSON.stringify([tema([1], { resumen: 'Preguntaste si la mamá se anima a viajar', esperando_respuesta: true })]);
+  }, config, true, { detalle: 'alto' });
+  assert.match(prompt, /esperando_respuesta=true solo si el último mensaje sobre ese tema es de JO/);
+  assert.match(prompt, /Saludos, agradecimientos.*relevancia 1/);
+  assert.doesNotMatch(prompt, /"clase":"aviso"/);
+  assert.equal(r.temas[0].esperando_respuesta, true);
 });
 
 test('modo normal: no incluye reglas de catálogo y conserva la regla estricta', async () => {
@@ -135,32 +157,96 @@ test('intereses con caracteres especiales no rompen la búsqueda', () => {
 
 const catalogo = (items, extra = {}) => ({ chatNombre: 'Roperito', modo: 'catalogo', detalle: 'alto', menores: [], temas: items, ...extra });
 
-test('catálogo: agrupa por vendedor, marca búsquedas y oculta vendidos en WhatsApp', () => {
+test('catálogo: agrupa por clase y rubro, con autor por línea, precios en negrita y sin vendidos en WhatsApp', () => {
   const r = seccionGrupos([catalogo([
-    tema([1], { de: 'Cintia', resumen: 'Bici de nena, $30.000' }),
-    tema([2], { de: 'Marta', resumen: 'Campera talle 8, $12.000' }),
-    tema([3], { de: 'Cintia', resumen: 'Casco, $5.000' }),
-    tema([4], { de: 'Laura', resumen: 'Cochecito', categoria: 'busca' }),
-    tema([5], { de: 'Marta', resumen: 'Botas talle 30', estado: 'resuelto' }),
-  ])]);
-  assert.match(r.texto, /🛍️ \*Roperito\* — 4 publicaciones/);
-  assert.ok(r.texto.indexOf('*Cintia*') < r.texto.indexOf('Casco'), 'Casco debe estar bajo Cintia');
-  assert.equal(r.texto.match(/\*Cintia\*/g).length, 1, 'cada vendedor aparece una sola vez');
-  assert.match(r.texto, /• 🔎 Cochecito/);
-  assert.doesNotMatch(r.texto, /Botas/);
+    tema([1], { de: 'Raquel', resumen: 'Aire acondicionado 3200W, $350.000', clase: 'ofrecimiento', rubro: 'Hogar' }),
+    tema([2], { de: 'Marian', resumen: 'Marian comparte dúplex 4 ambientes en Las Cañitas', clase: 'ofrecimiento', rubro: 'Alquileres' }),
+    tema([3], { de: 'Paola', resumen: 'Casa con pileta en Canning, USD 5.500 enero', clase: 'ofrecimiento', rubro: 'alquileres' }),
+    tema([4], { de: 'Lau', resumen: 'Service de aire acondicionado confiable', clase: 'solicitud', rubro: 'Servicios' }),
+    tema([5], { de: 'Marta', resumen: 'Botas talle 30', clase: 'ofrecimiento', rubro: 'Ropa', estado: 'resuelto' }),
+  ])], { hoy: '2026-10-24' });
+  const t = r.texto;
+  assert.match(t, /^🛍️ \*Roperito\* · 4 publicaciones/);
+  assert.ok(t.indexOf('🙋 *Piden o buscan*') < t.indexOf('🎁 *Ofrecen*'), 'pedidos antes que ofrecimientos');
+  assert.match(t, /🏠 _Alquileres_\n• Comparte dúplex 4 ambientes en Las Cañitas — \*Marian\*\n• Casa con pileta en Canning, \*USD 5\.500\* enero — \*Paola\*/);
+  assert.match(t, /🛋️ _Hogar_\n• Aire acondicionado 3200W, \*\$350\.000\* — \*Raquel\*/);
+  assert.match(t, /🛠️ _Servicios_\n• Service de aire acondicionado confiable — \*Lau\*/);
+  assert.doesNotMatch(t, /Botas/);
   assert.equal(r.ocultos, 0);
 });
 
-test('catálogo completo: incluye vendidos tachados y no tiene topes', () => {
-  const items = [tema([1], { de: 'A', resumen: 'Uno' }), tema([2], { de: 'A', resumen: 'Dos' }), tema([3], { de: 'B', resumen: 'Tres', estado: 'resuelto' })];
+test('catálogo completo: incluye lo que ya no está, tachado, y no tiene topes', () => {
+  const items = [tema([1], { de: 'A', resumen: 'Uno', clase: 'ofrecimiento' }), tema([2], { de: 'A', resumen: 'Dos', clase: 'ofrecimiento' }), tema([3], { de: 'B', resumen: 'Tres', clase: 'ofrecimiento', estado: 'resuelto' })];
   const corto = seccionGrupos([catalogo(items)], { limites: { max_items_catalogo: 1 } });
   assert.equal(corto.ocultos, 1);
-  assert.match(corto.texto, /1 publicación\(es\) más en el detalle completo|más en el detalle completo/);
+  assert.match(corto.texto, /…y 1 publicación\(es\) más en el detalle completo/);
   const completo = seccionGrupos([catalogo(items)], { completo: true, limites: { max_items_catalogo: 1 } });
   assert.equal(completo.ocultos, 0);
-  assert.match(completo.texto, /Uno/);
-  assert.match(completo.texto, /Dos/);
-  assert.match(completo.texto, /~Tres~ \(vendido\)/);
+  assert.match(completo.texto, /• Uno — \*A\*/);
+  assert.match(completo.texto, /• Dos — \*A\*/);
+  assert.match(completo.texto, /• ~Tres~ _\(ya no está\)_ — \*B\*/);
+});
+
+test('grupo normal: secciones por clase, ❗ en lo importante y marcas de fecha', () => {
+  const g = { chatNombre: '5° Grado', modo: 'normal', detalle: 'alto', menores: [], temas: [
+    tema([1], { resumen: 'Se suspende el bingo por el temporal', clase: 'aviso', relevancia: 3 }),
+    tema([2], { resumen: 'Acto del día de la familia', clase: 'evento', tipo: 'evento', fecha_limite: '2026-10-25 09:00' }),
+    tema([3], { resumen: 'Excursión al zoo', clase: 'evento', tipo: 'evento', fecha_limite: '2026-10-24' }),
+    tema([4], { resumen: 'Reunión de padres', clase: 'evento', tipo: 'evento', fecha_limite: '2026-10-29' }),
+    tema([5], { resumen: 'Cumpleaños de Pepe', clase: 'social', relevancia: 1 }),
+  ] };
+  const t = seccionGrupos([g], { hoy: '2026-10-24' }).texto;
+  assert.match(t, /^👥 \*5° Grado\*/);
+  assert.match(t, /📢 \*Avisos\*\n• ❗ Se suspende el bingo por el temporal/);
+  assert.match(t, /• ⏰ \*MAÑANA 09:00\* · Acto del día de la familia/);
+  assert.match(t, /• ⚠️ \*HOY\* · Excursión al zoo/);
+  assert.match(t, /• 🗓️ \*\w+ 29\/10\* · Reunión de padres/);
+  assert.match(t, /🎉 \*Social\*\n• Cumpleaños de Pepe/);
+  assert.ok(t.indexOf('Avisos') < t.indexOf('Fechas y eventos') && t.indexOf('Fechas y eventos') < t.indexOf('Social'));
+});
+
+test('un chat con una sola clase no lleva encabezado de clase', () => {
+  const t = seccionGrupos([{ chatNombre: 'Rosario', modo: 'normal', detalle: 'alto', menores: [], temas: [tema([1], { resumen: 'Salió el boletín', clase: 'aviso' })] }]).texto;
+  assert.equal(t, '👥 *Rosario*\n• Salió el boletín');
+});
+
+test('compatibilidad: la categoria vieja venta/busca se ubica como ofrecimiento/solicitud', () => {
+  const t = seccionGrupos([catalogo([tema([1], { de: 'A', resumen: 'Bici', categoria: 'venta' }), tema([2], { de: 'B', resumen: 'Cochecito', categoria: 'busca' })])]).texto;
+  assert.match(t, /🙋 \*Piden o buscan\*\n• Cochecito — \*B\*/);
+  assert.match(t, /🎁 \*Ofrecen\*\n• Bici — \*A\*/);
+});
+
+test('resaltarPrecios y marcaFecha', () => {
+  assert.equal(resaltarPrecios('Bici a $30.000 o USD 50'), 'Bici a *$30.000* o *USD 50*');
+  assert.equal(resaltarPrecios('ya *tiene* formato $10'), 'ya *tiene* formato $10');
+  assert.equal(resaltarPrecios('enero USD 5.500, febrero $5.000.'), 'enero *USD 5.500*, febrero *$5.000*.');
+  assert.equal(resaltarPrecios('a $20 mil'), 'a *$20 mil*');
+  assert.equal(marcaFecha('2026-10-23', '2026-10-24'), '', 'una fecha pasada no se marca');
+  assert.equal(marcaFecha(null, '2026-10-24'), '');
+  assert.equal(marcaFecha('2026-10-24 18:30', '2026-10-24'), '⚠️ *HOY 18:30* · ');
+});
+
+test('conversaciones: lo que esperás primero con ⏳; los saludos solo en el detalle', () => {
+  const convs = [{ chatNombre: 'Carmen Perez', temas: [
+    tema([1], { resumen: 'Le comentaste del regalo', relevancia: 2 }),
+    tema([2], { resumen: 'Preguntaste por pasajes al 20/12 a USD 600', relevancia: 2, esperando_respuesta: true }),
+    tema([3], { resumen: 'Le mandaste un saludo', relevancia: 1 }),
+  ], menores: [] }, { chatNombre: 'Solo hola', temas: [tema([4], { resumen: 'Hola, ¿cómo andás?', relevancia: 1 })], menores: [] }];
+  const wa = seccionConversaciones(convs);
+  assert.match(wa.texto, /^💬 \*Tus conversaciones\*\n\n👤 \*Carmen Perez\*\n• ⏳ _Esperás respuesta:_ Preguntaste por pasajes al 20\/12 a \*USD 600\*\n• Le comentaste del regalo$/);
+  assert.doesNotMatch(wa.texto, /saludo|Solo hola/);
+  assert.equal(wa.ocultos, 0, 'los saludos no fuerzan el link al detalle');
+  const completo = seccionConversaciones(convs, { completo: true });
+  assert.match(completo.texto, /◦ Le mandaste un saludo/);
+  assert.match(completo.texto, /👤 \*Solo hola\*\n_Charla menor:_\n◦ Hola, ¿cómo andás\?/);
+});
+
+test('conversaciones: sin temas sustanciales no hay sección; los pendientes personales no se repiten', () => {
+  assert.equal(seccionConversaciones([{ chatNombre: 'X', temas: [tema([1], { relevancia: 1 })] }]).texto, '');
+  const t = seccionConversaciones([{ chatNombre: 'Y', temas: [tema([1], { tipo: 'accion', estado: 'pendiente', para_mi: true, resumen: 'Mandar el comprobante' }), tema([2], { resumen: 'Te contó que se muda' })] }]).texto;
+  assert.doesNotMatch(t, /comprobante/);
+  assert.match(t, /Te contó que se muda/);
+  assert.equal((seccionConversaciones([{ chatNombre: 'Z', temas: Array.from({ length: 10 }, (_, i) => tema([i + 1], { resumen: `T${i}` })) }], { limites: { max_temas_conversacion: 3 } })).ocultos, 7);
 });
 
 const grupo = (n, extra = {}) => ({
