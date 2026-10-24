@@ -284,7 +284,7 @@ const seccionGrupos = (resumenesChats, opciones) => formato.seccionGrupos(resume
 const formatearDetalle = (resumenesChats, coincidencias, etiqueta) => formato.formatearDetalle(resumenesChats, coincidencias, etiqueta, config.resumen);
 
 function urlPublica() {
-  return (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://botwp-ikbb.onrender.com').replace(/\/$/, '');
+  return (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://botwp-nivv.onrender.com').replace(/\/$/, '');
 }
 
 /**
@@ -1076,7 +1076,7 @@ async function main() {
   }
   try {
     await iniciarCliente({
-      onQR: (qr) => { estadoWA = 'qr'; qrActual = qr; tsAutenticando = null; console.log(`[WA] QR listo — abrí https://botwp-ikbb.onrender.com para escanearlo`); },
+      onQR: (qr) => { estadoWA = 'qr'; qrActual = qr; tsAutenticando = null; console.log(`[WA] QR listo — abrí ${urlPublica()} para escanearlo`); },
       onAutenticando: () => { estadoWA = 'autenticando'; qrActual = null; tsAutenticando = Date.now(); console.log(`[WA] QR escaneado — autenticando...`); },
       onListo: () => {
         const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : '?';
