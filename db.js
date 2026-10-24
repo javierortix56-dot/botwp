@@ -83,6 +83,12 @@ async function conectar() {
       updated_at   INTEGER DEFAULT (unixepoch())
     );
 
+    CREATE TABLE IF NOT EXISTS ajustes (
+      clave      TEXT PRIMARY KEY,
+      valor      TEXT NOT NULL,
+      updated_at INTEGER DEFAULT (unixepoch())
+    );
+
     CREATE TABLE IF NOT EXISTS reportes (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
       tipo        TEXT,
@@ -96,6 +102,19 @@ async function conectar() {
   const columnas = await dbExecute('PRAGMA table_info(mensajes)', 'columnas');
   if (!columnas.rows.some(c => c.name === 'es_propio')) {
     await dbExecute('ALTER TABLE mensajes ADD COLUMN es_propio INTEGER DEFAULT 0', 'migrar-es-propio');
+  }
+  // Veces que el análisis de un mensaje falló: tras varios intentos se abandona
+  // en vez de reintentarlo (y gastar Gemini) en cada digest para siempre.
+  if (!columnas.rows.some(c => c.name === 'intentos')) {
+    await dbExecute('ALTER TABLE mensajes ADD COLUMN intentos INTEGER DEFAULT 0', 'migrar-intentos');
+  }
+
+  // El botón de prueba viejo guardaba un mensaje falso ("Tester") que después
+  // aparecía en los resúmenes. Ya no lo hace; se limpian los que quedaron.
+  try {
+    await dbExecute(`DELETE FROM mensajes WHERE chat_id = 'test@c.us'`, 'limpiar-prueba');
+  } catch (err) {
+    console.warn(`[DB] No se pudieron limpiar mensajes de prueba:`, err.message);
   }
 
   // Crear índice único para deduplicación. Si ya hay duplicados de antes
@@ -134,18 +153,25 @@ async function guardarMensaje({ chatId, chatNombre, remitente, remitenteId, cuer
   }
 }
 
-async function obtenerMensajesSinProcesar() {
+/**
+ * Mensajes pendientes de analizar + hasta `contexto` mensajes ya procesados
+ * (últimos 7 días) de cada chat con novedades, marcados solo_contexto. El
+ * contexto ayuda a entender respuestas, pero cada mensaje extra es tamaño de
+ * prompt y, pasado el lote de 25, una llamada más a Gemini.
+ */
+async function obtenerMensajesSinProcesar({ contexto = 12 } = {}) {
   try {
-    const result = await db.execute(
-      `SELECT *, CASE WHEN procesado = 1 THEN 1 ELSE 0 END AS solo_contexto
+    const result = await db.execute({
+      sql: `SELECT *, CASE WHEN procesado = 1 THEN 1 ELSE 0 END AS solo_contexto
        FROM mensajes WHERE procesado = 0 OR
        id IN (SELECT id FROM (
          SELECT id, ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY timestamp DESC, id DESC) AS posicion
          FROM mensajes WHERE procesado = 1 AND timestamp >= unixepoch() - 7 * 86400
          AND chat_id IN (SELECT DISTINCT chat_id FROM mensajes WHERE procesado = 0)
-       ) WHERE posicion <= 50)
-       ORDER BY timestamp ASC`
-    );
+       ) WHERE posicion <= ?)
+       ORDER BY timestamp ASC`,
+      args: [Math.max(0, Number(contexto) || 0)],
+    });
     return result.rows;
   } catch (err) {
     console.error(`[DB] Error al leer mensajes sin procesar:`, err.message);
@@ -320,6 +346,77 @@ async function actualizarUltimoProcesado(chatNombreKey) {
  * Guarda o actualiza un contacto (jid → nombre amigable).
  * Solo actualiza si el nuevo nombre no es vacío.
  */
+/**
+ * Suma un intento fallido a mensajes cuyo análisis falló. Los que llegan a
+ * `maximo` se dan por procesados (no se reintentan más). Devuelve cuántos se
+ * abandonaron.
+ */
+async function registrarFallos(ids, maximo = 3) {
+  if (!ids.length) return 0;
+  try {
+    const ph = ids.map(() => '?').join(', ');
+    await dbExecute({ sql: `UPDATE mensajes SET intentos = COALESCE(intentos, 0) + 1 WHERE id IN (${ph})`, args: ids }, 'registrarFallos');
+    const r = await dbExecute({
+      sql: `UPDATE mensajes SET procesado = 1 WHERE id IN (${ph}) AND intentos >= ? AND procesado = 0`,
+      args: [...ids, maximo],
+    }, 'abandonarFallidos');
+    return r.rowsAffected || 0;
+  } catch (err) {
+    console.error(`[DB] Error registrando fallos de análisis:`, err.message);
+    return 0;
+  }
+}
+
+/** Cantidad de mensajes guardados que todavía no entraron en un resumen. */
+async function contarPendientes() {
+  try {
+    const r = await db.execute(`SELECT COUNT(*) AS n FROM mensajes WHERE procesado = 0`);
+    return Number(r.rows[0]?.n || 0);
+  } catch (err) {
+    console.error(`[DB] Error contando pendientes:`, err.message);
+    return null;
+  }
+}
+
+/** Ajuste persistente (JSON) guardado en Turso, o null si no existe o falla. */
+async function obtenerAjuste(clave) {
+  try {
+    const r = await dbExecute({ sql: `SELECT valor FROM ajustes WHERE clave = ?`, args: [clave] }, `ajuste ${clave}`);
+    return r.rows[0] ? JSON.parse(r.rows[0].valor) : null;
+  } catch (err) {
+    console.error(`[DB] Error leyendo ajuste ${clave}:`, err.message);
+    return null;
+  }
+}
+
+async function guardarAjuste(clave, valor) {
+  try {
+    await dbExecute({
+      sql: `INSERT INTO ajustes (clave, valor, updated_at) VALUES (?, ?, unixepoch())
+            ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor, updated_at = unixepoch()`,
+      args: [clave, JSON.stringify(valor)],
+    }, `guardar ajuste ${clave}`);
+    return true;
+  } catch (err) {
+    console.error(`[DB] Error guardando ajuste ${clave}:`, err.message);
+    return false;
+  }
+}
+
+/** Último reporte de un tipo (ej. 'digest'), o null. */
+async function ultimoReporte(tipo) {
+  try {
+    const r = await db.execute({
+      sql: `SELECT id, tipo, n_mensajes, n_temas, creado_en FROM reportes WHERE tipo = ? ORDER BY creado_en DESC, id DESC LIMIT 1`,
+      args: [tipo],
+    });
+    return r.rows[0] || null;
+  } catch (err) {
+    console.error(`[DB] Error leyendo último reporte:`, err.message);
+    return null;
+  }
+}
+
 async function guardarContacto(jid, nombre) {
   if (!jid || !nombre) return;
   try {
@@ -504,4 +601,9 @@ module.exports = {
   guardarReporte,
   obtenerReportes,
   obtenerReporte,
+  registrarFallos,
+  contarPendientes,
+  obtenerAjuste,
+  guardarAjuste,
+  ultimoReporte,
 };

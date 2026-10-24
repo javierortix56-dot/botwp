@@ -21,6 +21,8 @@
     "max_temas_grupo_alto": 40,
     "max_items_catalogo": 80,
     "max_temas_conversacion": 8,
+    "mensajes_contexto": 12,
+    "max_intentos": 3,
     "intereses": []
   },
   "conexion": {
@@ -32,7 +34,13 @@
     "sync_max_segundos": 240
   },
   "vision": {
-    "describir_imagenes": true
+    "describir_imagenes": true,
+    "max_por_dia": 60,
+    "caption_suficiente": 80
+  },
+  "gemini": {
+    "max_llamadas_dia": 900,
+    "min_ms_entre_llamadas": 4500
   },
   "sin_responder": {
     "activado": true,
