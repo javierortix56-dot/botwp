@@ -121,8 +121,13 @@ function obtenerOpcionesGrupo(chatNombre) {
   const obj = g && typeof g === 'object' ? g : {};
   return {
     modo: obj.modo === 'catalogo' ? 'catalogo' : 'normal',
-    detalle: obj.detalle === 'alto' ? 'alto' : 'normal',
+    detalle: ['alto', 'normal'].includes(obj.detalle) ? obj.detalle : detalleDefecto(),
   };
+}
+
+/** Detalle que usa todo chat sin "detalle" propio: resumen.detalle_defecto ("alto" o "normal"). */
+function detalleDefecto() {
+  return config.resumen?.detalle_defecto === 'alto' ? 'alto' : 'normal';
 }
 
 const sinAcentos = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
@@ -154,4 +159,4 @@ function buscarIntereses(mensajes, intereses) {
   return out;
 }
 
-module.exports = { debeAnalizarse, obtenerFlags, esVip, esGrupoMonitoreado, tieneKeyword, esIndividual, obtenerFrecuenciaGrupo, obtenerConfigGrupo, obtenerOpcionesGrupo, buscarIntereses, recargar };
+module.exports = { debeAnalizarse, obtenerFlags, esVip, esGrupoMonitoreado, tieneKeyword, esIndividual, obtenerFrecuenciaGrupo, obtenerConfigGrupo, obtenerOpcionesGrupo, detalleDefecto, buscarIntereses, recargar };

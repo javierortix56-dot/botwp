@@ -47,7 +47,7 @@ const {
   esperarSincronizacion,
 } = require('./whatsapp');
 const { analizarChat, analizarIndividuales, generarTitular, filtrarSinResponder } = require('./gemini');
-const { recargar: recargarFiltros, obtenerOpcionesGrupo, buscarIntereses } = require('./filtros');
+const { recargar: recargarFiltros, obtenerOpcionesGrupo, detalleDefecto, buscarIntereses } = require('./filtros');
 
 let config = require('./config.json');
 
@@ -534,7 +534,7 @@ function generarPaginaConfiguracion(chatsDB, configActual, contactos, mensaje) {
       <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0;text-align:center;color:#888">${c.cantidad}</td>
       <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${selectFrecuencia(c.chat_nombre, c.frecuencia)}</td>
       <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${esGrupo ? selectOpcion('modo', c.chat_nombre, c.modo, [['normal', 'Normal'], ['catalogo', 'Catálogo (compraventa)']]) : '—'}</td>
-      <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${esGrupo ? selectOpcion('det', c.chat_nombre, c.detalle, [['normal', 'Normal'], ['alto', 'Alto']]) : '—'}</td>
+      <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${esGrupo ? selectOpcion('det', c.chat_nombre, c.detalle || detalleDefecto(), [['normal', 'Normal'], ['alto', 'Alto']]) : '—'}</td>
     </tr>`;
   }).join('');
 
@@ -747,7 +747,7 @@ function iniciarServidor() {
             nombre: chatNombre,
             frecuencia_horas: frecuencia,
             ...(params.get(`modo_${sufijo}`) === 'catalogo' ? { modo: 'catalogo' } : {}),
-            ...(params.get(`det_${sufijo}`) === 'alto' ? { detalle: 'alto' } : {}),
+            ...(['alto', 'normal'].includes(params.get(`det_${sufijo}`)) ? { detalle: params.get(`det_${sufijo}`) } : {}),
           });
         }
 
@@ -861,7 +861,7 @@ async function analizarLote(todos, etiqueta, sinResponder = null) {
   let resIndiv = { eventos: [], compromisos: [], pedidos: [] };
   if (individuales.length) {
     try {
-      const r = await analizarIndividuales(individuales, contactos);
+      const r = await analizarIndividuales(individuales, contactos, { detalle: detalleDefecto() });
       resIndiv = r;
       idsProcesados.push(...(r.idsProcesados || []));
       erroresAnalisis += r.errores || 0;
@@ -894,7 +894,7 @@ async function analizarLote(todos, etiqueta, sinResponder = null) {
   const texto = formatearDigest(accionables, resumenesChats, meta);
   const conversaciones = (resIndiv.conversaciones || []).filter(c => c.temas.length);
   const detalleConversaciones = conversaciones.length
-    ? '\n\n💬 *Tus conversaciones*\n' + conversaciones.map(c => `*${c.chatNombre}*\n${c.temas.slice(0, 3).map(t => '• ' + t.resumen).join('\n')}`).join('\n\n')
+    ? '\n\n💬 *Tus conversaciones*\n' + conversaciones.map(c => `*${c.chatNombre}*\n${c.temas.slice(0, config.resumen?.max_temas_conversacion ?? 8).map(t => '• ' + t.resumen).join('\n')}`).join('\n\n')
     : '';
   const totalTemas = resumenesChats.reduce((a, r) => a + r.temas.length, 0)
     + conversaciones.reduce((n, c) => n + c.temas.length, 0)

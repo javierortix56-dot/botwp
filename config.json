@@ -16,9 +16,11 @@
   "resumen": {
     "horas_digest": ["0 11 * * *", "0 21 * * *"],
     "max_mensajes_por_batch": 25,
+    "detalle_defecto": "alto",
     "max_temas_grupo": 5,
-    "max_temas_grupo_alto": 12,
-    "max_items_catalogo": 20,
+    "max_temas_grupo_alto": 40,
+    "max_items_catalogo": 80,
+    "max_temas_conversacion": 8,
     "intereses": []
   },
   "conexion": {
