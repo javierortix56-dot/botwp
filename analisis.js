@@ -5,9 +5,43 @@ const TZ = 'America/Argentina/Buenos_Aires';
 const REGLA_RELEVANCIA_NORMAL = 'Relevancia 1..3: 3 atención personal/aviso importante; 2 cambio, decisión o novedad útil; 1 charla sin impacto. Omite cumpleaños, felicitaciones, debates repetitivos, spam y ofertas sin interés explícito.';
 const REGLA_RELEVANCIA_ALTA = 'Relevancia 1..3: 3 atención personal/aviso importante; 2 cambio, decisión, oferta o novedad útil; 1 charla menor (cumpleaños, felicitaciones, conversación sin impacto). NO omitas ofertas, ventas, búsquedas, anuncios ni novedades: regístralos con relevancia 2 como mínimo. Omite solo spam masivo y cadenas. No filtres por interés ni por relevancia personal de {YO}: reporta todo lo que se habla. Cada tema puede resumirse en hasta 2 frases con los datos concretos (quién, qué, precio, fecha, lugar).';
 const CLASES = ['ofrecimiento', 'solicitud', 'aviso', 'evento', 'social', 'charla'];
-const REGLA_CLASE = 'clase de cada tema: "ofrecimiento" (alguien vende, alquila, regala u ofrece algo o un servicio), "solicitud" (alguien pide, busca o consulta por algo o un servicio), "aviso" (comunicado, novedad, cambio o decisión), "evento" (algo con fecha: acto, reunión, salida), "social" (cumpleaños, felicitaciones, saludos), "charla" (conversación sin otra categoría). rubro: categoría corta del artículo o asunto en 1-2 palabras (ej. "Alquileres", "Ropa", "Comida", "Hogar", "Servicios", "Escuela", "Juguetes", "Emprendimientos") o null. En ofrecimientos y solicitudes el resumen NO empieza con el nombre de quien publica (va en "de"): describe el artículo o servicio con precio, talle, zona y datos concretos.';
+const REGLA_CLASE = 'clase de cada tema: "ofrecimiento" (alguien vende, alquila, regala u ofrece algo o un servicio), "solicitud" (alguien pide, busca o consulta por algo o un servicio), "aviso" (comunicado, novedad, cambio o decisión), "evento" (algo con fecha: acto, reunión, salida), "social" (cumpleaños, felicitaciones, saludos), "charla" (conversación sin otra categoría). rubro: categoría corta del artículo o asunto en 1-2 palabras (ej. "Alquileres", "Ropa", "Comida", "Hogar", "Servicios", "Escuela", "Juguetes", "Emprendimientos") o null. En ofrecimientos y solicitudes el resumen NO empieza con el nombre de quien publica (va en "de") ni con «Se vende», «Se ofrece», «Se comparte» o «Se anuncia»: empieza directamente por el artículo o servicio, con precio, talle, zona y datos concretos (ej. "Aire acondicionado LIKON 3200W, excelente estado, $350.000").';
 const REGLA_ESPERANDO = 'esperando_respuesta=true solo si el último mensaje sobre ese tema es de {YO}, es una pregunta, consulta o pedido concreto que espera contestación, y la otra persona todavía no respondió. Saludos, agradecimientos, "ok", emojis, despedidas y charla de cortesía tienen relevancia 1 y esperando_respuesta=false, aunque nadie haya contestado.';
 const REGLA_CATALOGO = 'MODO CATÁLOGO (grupo de compraventa): registra CADA artículo ofrecido, buscado o pedido como un tema propio, sin fundir artículos distintos (tipo info, estado informativo, relevancia 2). "de" = quien lo publica. "tema" = el artículo (2-5 palabras). "resumen" = artículo + precio + talle/estado/zona/retiro si se menciona (si no hay precio, "sin precio"). clase "ofrecimiento" si lo vende, alquila, regala u ofrece, "solicitud" si alguien lo pide, busca o consulta por él; rubro siempre completo. Si un mensaje posterior indica que ya se vendió o no está disponible, pasa ese tema a estado "resuelto". Mantén los artículos ya publicados del ESTADO ANTERIOR. para_mi=false salvo pedido personal explícito a {YO}.';
+
+const TIPOS = ['accion', 'pago', 'evento', 'info'];
+const ESTADOS = ['pendiente', 'resuelto', 'cancelado', 'informativo'];
+
+// Motivo por el que un tema no se puede usar, o null si está bien. Solo cuentan
+// los campos de los que depende el digest; los de presentación (clase, rubro,
+// esperando_respuesta) se normalizan y nunca descartan el chat.
+function motivoInvalido(t, evidencia) {
+  if (!t || typeof t !== 'object') return 'no es un objeto';
+  if (typeof t.resumen !== 'string' || typeof t.tema !== 'string') return 'falta tema o resumen';
+  if (!TIPOS.includes(t.tipo)) return `tipo "${t.tipo}"`;
+  if (!ESTADOS.includes(t.estado)) return `estado "${t.estado}"`;
+  if (typeof t.para_mi !== 'boolean') return 'para_mi no es booleano';
+  const noTexto = ['accion', 'de', 'fecha_limite'].find(k => t[k] != null && typeof t[k] !== 'string');
+  if (noTexto) return `${noTexto} no es texto`;
+  if (!Array.isArray(t.ids) || !t.ids.length) return 'sin ids de evidencia';
+  const ajeno = t.ids.find(id => !evidencia.has(id));
+  if (ajeno !== undefined) return `id ${ajeno} no está en los mensajes`;
+  return null;
+}
+
+function interpretarRespuesta(respuesta, evidencia) {
+  const parsed = JSON.parse(String(respuesta).replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim());
+  if (!Array.isArray(parsed)) throw new Error('Respuesta de análisis no es un array');
+  const texto = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  return parsed.map((t, i) => {
+    const motivo = motivoInvalido(t, evidencia);
+    if (motivo) throw new Error(`Tema sin esquema o evidencia válida (tema ${i + 1}: ${motivo})`);
+    return { ...t, para_mi: t.para_mi === true, me_piden: t.para_mi === true,
+      clase: CLASES.includes(t.clase) ? t.clase : null, rubro: texto(t.rubro), categoria: texto(t.categoria),
+      esperando_respuesta: t.esperando_respuesta === true,
+      relevancia: [1, 2, 3].includes(t.relevancia) ? t.relevancia : 1 };
+  });
+}
 
 function agrupar(mensajes) {
   const chats = new Map();
@@ -57,22 +91,20 @@ Fechas relativas se calculan desde la FECHA DEL MENSAJE, nunca desde hoy. Conser
 Devuelve SOLO un array JSON de objetos: {"tema":"asunto concreto","resumen":"hecho o acuerdo breve","tipo":"info","de":"autor","para_mi":false,"estado":"informativo","relevancia":2,"accion":null,"fecha_limite":null,"ids":[1]${individual ? ',"esperando_respuesta":false' : ',"clase":"aviso","rubro":null'}}.
 ESTADO ANTERIOR: ${JSON.stringify(temas)}
 MENSAJES: ${JSON.stringify(datos)}`;
-      const respuesta = await llamar(prompt);
-      const parsed = JSON.parse(respuesta.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim());
-      if (!Array.isArray(parsed)) throw new Error('Respuesta de análisis no es un array');
-      temas = parsed.map(t => {
-        if (!t || typeof t.resumen !== 'string' || typeof t.tema !== 'string'
-          || !['accion', 'pago', 'evento', 'info'].includes(t.tipo)
-          || !['pendiente', 'resuelto', 'cancelado', 'informativo'].includes(t.estado)
-          || typeof t.para_mi !== 'boolean'
-          || [t.accion, t.de, t.fecha_limite, t.categoria, t.clase, t.rubro].some(v => v != null && typeof v !== 'string')
-          || !Array.isArray(t.ids) || !t.ids.length || t.ids.some(id => !evidencia.has(id))) {
-          throw new Error('Tema sin esquema o evidencia válida');
+      // Una respuesta inválida (JSON roto, un tema sin evidencia) se reintenta una
+      // vez antes de dar el chat por fallido: Gemini no siempre responde igual.
+      let error = null;
+      let nuevosTemas = null;
+      for (let intento = 1; intento <= 2 && !nuevosTemas; intento++) {
+        try {
+          nuevosTemas = interpretarRespuesta(await llamar(prompt), evidencia);
+        } catch (err) {
+          error = err;
+          if (intento === 1) console.warn(`[Análisis] ${nombre}: respuesta inválida (${err.message}), reintento`);
         }
-        return { ...t, para_mi: t.para_mi === true, me_piden: t.para_mi === true,
-          clase: CLASES.includes(t.clase) ? t.clase : null, esperando_respuesta: t.esperando_respuesta === true,
-          relevancia: [1, 2, 3].includes(t.relevancia) ? t.relevancia : 1 };
-      });
+      }
+      if (!nuevosTemas) throw error;
+      temas = nuevosTemas;
     }
     const nuevos = new Set(mensajes.filter(m => !m.solo_contexto).map(m => m.id));
     // Temas tocados por mensajes nuevos. En detalle alto/catálogo entra todo
