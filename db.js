@@ -354,12 +354,31 @@ async function obtenerContactos() {
  */
 async function guardarReporte(tipo, contenido, nMensajes = 0, nTemas = 0) {
   try {
-    await db.execute({
+    const r = await db.execute({
       sql: `INSERT INTO reportes (tipo, contenido, n_mensajes, n_temas) VALUES (?, ?, ?, ?)`,
       args: [tipo ?? null, contenido, nMensajes, nTemas],
     });
+    // id del reporte: el digest lo usa para linkear al detalle completo
+    return r?.lastInsertRowid != null ? Number(r.lastInsertRowid) : null;
   } catch (err) {
     console.error(`[DB] Error guardando reporte:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Devuelve un reporte por id, o null si no existe o falla la consulta.
+ */
+async function obtenerReporte(id) {
+  try {
+    const result = await db.execute({
+      sql: `SELECT id, tipo, contenido, n_mensajes, n_temas, creado_en FROM reportes WHERE id = ?`,
+      args: [id],
+    });
+    return result.rows[0] || null;
+  } catch (err) {
+    console.error(`[DB] Error leyendo reporte ${id}:`, err.message);
+    return null;
   }
 }
 
@@ -484,4 +503,5 @@ module.exports = {
   obtenerContactos,
   guardarReporte,
   obtenerReportes,
+  obtenerReporte,
 };

@@ -110,4 +110,48 @@ function obtenerConfigGrupo(chatNombre) {
   return grupoConfig || null;
 }
 
-module.exports = { debeAnalizarse, obtenerFlags, esVip, esGrupoMonitoreado, tieneKeyword, esIndividual, obtenerFrecuenciaGrupo, obtenerConfigGrupo, recargar };
+/**
+ * Opciones de análisis del grupo según config.json: { modo, detalle }.
+ *  - modo "catalogo": grupo de compraventa (cada artículo es un ítem, agrupado por vendedor)
+ *  - detalle "alto": no descarta ofertas ni temas menores y no recorta tanto el resumen
+ * Cualquier otro valor (o grupo sin configurar) cae en "normal".
+ */
+function obtenerOpcionesGrupo(chatNombre) {
+  const g = obtenerConfigGrupo(chatNombre);
+  const obj = g && typeof g === 'object' ? g : {};
+  return {
+    modo: obj.modo === 'catalogo' ? 'catalogo' : 'normal',
+    detalle: obj.detalle === 'alto' ? 'alto' : 'normal',
+  };
+}
+
+const sinAcentos = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+const escaparRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Mensajes recibidos que mencionan alguno de los intereses configurados
+ * (config.resumen.intereses). Sin acentos ni mayúsculas, y la coincidencia tiene
+ * que empezar en inicio de palabra: "bici" encuentra "bicicleta" pero "cuna" no
+ * encuentra "escuna". Ignora mensajes propios y contexto ya resumido.
+ * Devuelve [{ interes, chat, de, texto, ts }] sin repetir el mismo mensaje.
+ */
+function buscarIntereses(mensajes, intereses) {
+  const lista = (intereses || []).map((i) => String(i).trim()).filter(Boolean)
+    .map((i) => ({ original: i, re: new RegExp(`(^|[^a-z0-9])${escaparRegex(sinAcentos(i))}`) }));
+  if (!lista.length) return [];
+  const vistos = new Set();
+  const out = [];
+  for (const m of mensajes || []) {
+    if (m.es_propio || m.solo_contexto) continue;
+    const texto = sinAcentos(m.cuerpo);
+    const hit = lista.find((i) => i.re.test(texto));
+    if (!hit) continue;
+    const clave = `${m.chat_id}|${m.remitente_id}|${m.timestamp}|${m.cuerpo}`;
+    if (vistos.has(clave)) continue;
+    vistos.add(clave);
+    out.push({ interes: hit.original, chat: m.chat_nombre || m.chat_id, de: m.remitente || null, texto: String(m.cuerpo || ''), ts: Number(m.timestamp) });
+  }
+  return out;
+}
+
+module.exports = { debeAnalizarse, obtenerFlags, esVip, esGrupoMonitoreado, tieneKeyword, esIndividual, obtenerFrecuenciaGrupo, obtenerConfigGrupo, obtenerOpcionesGrupo, buscarIntereses, recargar };
