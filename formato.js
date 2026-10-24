@@ -266,6 +266,44 @@ function seccionConversaciones(conversaciones, { completo = false, limites = {},
   return { texto: bloques.length ? `💬 *Tus conversaciones*\n\n${bloques.join('\n\n')}` : '', ocultos };
 }
 
+// ── Aviso corto para ntfy ───────────────────────────────────────────────────
+
+/**
+ * Notificación push de un resumen: un titular, lo más urgente y un renglón de
+ * conteos. En el celular ntfy muestra solo texto plano, así que el resumen
+ * entero se ve como una pared de texto; el detalle completo está en el panel y
+ * la notificación trae un botón para abrirlo.
+ * meta: { titular, pendientesTop[], pendientes, urgentes, gruposConNovedades,
+ *         nSinResponder, nIntereses }
+ */
+function avisoNtfy(meta = {}, { hora = '', etiqueta = '' } = {}) {
+  const pendientes = Number(meta.pendientes) || 0;
+  const urgentes = Number(meta.urgentes) || 0;
+  const icono = urgentes > 0 ? '🚨' : pendientes > 0 ? '📌' : '✅';
+  const cuando = hora ? ` de las ${hora}` : '';
+  const sufijo = pendientes > 0 ? ` · ${pendientes} para resolver` : '';
+  const titulo = `${icono} Resumen${etiqueta ? ` ${etiqueta}` : cuando}${sufijo}`;
+
+  const lineas = [];
+  if (meta.titular) lineas.push(meta.titular);
+  const top = meta.pendientesTop || [];
+  if (top.length) {
+    if (lineas.length) lineas.push('');
+    lineas.push(...top);
+    if (pendientes > top.length) lineas.push(`…y ${pendientes - top.length} más en el panel`);
+  }
+  const conteos = [];
+  if (meta.gruposConNovedades) conteos.push(`📢 ${meta.gruposConNovedades} grupo${meta.gruposConNovedades === 1 ? '' : 's'} con novedades`);
+  if (meta.nSinResponder) conteos.push(`💬 ${meta.nSinResponder} sin responder`);
+  if (meta.nIntereses) conteos.push(`🔔 ${meta.nIntereses} de tus intereses`);
+  if (conteos.length) {
+    if (lineas.length) lineas.push('');
+    lineas.push(conteos.join(' · '));
+  }
+  if (!lineas.length) lineas.push('Todo tranquilo: nada pendiente para vos.');
+  return { titulo, cuerpo: lineas.join('\n') };
+}
+
 // ── Intereses, detalle y HTML ───────────────────────────────────────────────
 
 const MAX_INTERESES_WA = 6;
@@ -309,6 +347,6 @@ function htmlDesdeTexto(texto) {
 }
 
 module.exports = {
-  SEPARADOR, CLASES_VALIDAS, seccionGrupos, seccionConversaciones, formatearIntereses, formatearDetalle,
+  avisoNtfy, SEPARADOR, CLASES_VALIDAS, seccionGrupos, seccionConversaciones, formatearIntereses, formatearDetalle,
   htmlDesdeTexto, resaltarPrecios, marcaFecha, iconoRubro, claseDe, sinRelleno, MAX_INTERESES_WA,
 };

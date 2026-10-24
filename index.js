@@ -87,7 +87,7 @@ function textoPlano(texto) {
  * El título va codificado (RFC 2047) para admitir acentos y emojis, y el
  * cuerpo se recorta a ~3.8 KB: más largo, ntfy lo manda como archivo adjunto.
  */
-function postNtfy(title, body, { prioridad = 'default', tags = [], click } = {}) {
+function postNtfy(title, body, { prioridad = 'default', tags = [], click, acciones = [] } = {}) {
   if (!process.env.NTFY_TOPIC) {
     console.warn(`[ntfy] NTFY_TOPIC no configurado — notificación "${title}" omitida`);
     return;
@@ -106,6 +106,9 @@ function postNtfy(title, body, { prioridad = 'default', tags = [], click } = {})
   };
   if (tags.length) headers.Tags = tags.join(',');
   if (click) headers.Click = click;
+  // Botones bajo la notificación ("view" abre una URL). Las etiquetas van sin
+  // acentos: los headers HTTP no admiten caracteres fuera de ASCII.
+  if (acciones.length) headers.Actions = acciones.map((a) => `view, ${a.etiqueta}, ${a.url}`).join('; ');
   const req = https.request({ hostname: 'ntfy.sh', path: `/${process.env.NTFY_TOPIC}`, method: 'POST', headers }, (res) => {
     if (res.statusCode >= 200 && res.statusCode < 300) {
       console.log(`[ntfy] Notificación "${title}" enviada (${res.statusCode})`);
@@ -130,6 +133,24 @@ function alertar(tipo, titulo, texto, horas = 6) {
 }
 
 // Prioridad de la notificación según lo que trae el resumen.
+/**
+ * Notificación de un resumen: aviso corto con botón al panel. Si el resumen no
+ * trae temas (todo tranquilo, un error o la cuota agotada) el texto ya es
+ * corto y va completo.
+ */
+function notificarResumen({ texto, meta, totalTemas, idReporte, etiqueta }) {
+  const url = idReporte ? `${urlPublica()}/reporte?id=${idReporte}` : urlPublica();
+  const acciones = [{ etiqueta: idReporte ? 'Ver resumen' : 'Abrir panel', url }];
+  const hora = new Date().toLocaleTimeString('es-AR', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false });
+  const base = opcionesNtfy(meta);
+  if (!totalTemas) {
+    postNtfy(`Resumen ${etiqueta || ''}`.trim(), texto, { ...base, click: url, acciones });
+    return;
+  }
+  const { titulo, cuerpo } = formato.avisoNtfy(meta, { hora, etiqueta });
+  postNtfy(titulo, cuerpo, { ...base, click: url, acciones });
+}
+
 function opcionesNtfy(meta = {}) {
   if (meta.urgentes > 0) return { prioridad: 'high', tags: ['rotating_light'], click: urlPublica() };
   if (meta.pendientes > 0) return { prioridad: 'default', tags: ['pushpin'], click: urlPublica() };
@@ -656,6 +677,7 @@ async function estadoPanel() {
     nombre: (config.nombre_dueno || '').trim(),
     conexion: estadoWA === 'conectado' ? 'conectado' : estadoWA === 'standby' ? 'standby' : 'reconectando',
     ultimoDigest: ultimo ? {
+      id: ultimo.id,
       hace: haceCuantoCorto(ultimo.creado_en),
       cuando: new Date(Number(ultimo.creado_en) * 1000).toLocaleString('es-AR', { timeZone: TZ, weekday: 'short', hour: '2-digit', minute: '2-digit' }),
     } : null,
@@ -840,7 +862,7 @@ function iniciarServidor() {
           enviarHTML(res, panel.paginaNoEncontrado(), 404);
           return;
         }
-        enviarHTML(res, panel.paginaReporte(r, htmlDesdeTexto(r.contenido), { tz: TZ }));
+        enviarHTML(res, panel.paginaReporte(r, String(r.contenido || '').split(SEPARADOR).map((b) => htmlDesdeTexto(b.trim())).filter(Boolean), { tz: TZ }));
         return;
       }
 
@@ -987,6 +1009,13 @@ async function analizarLote(todos, etiqueta, sinResponder = null) {
     seccionConversaciones: convs.texto,
     pendientes: accionables.pendientes.length,
     urgentes: accionables.pendientes.filter((p) => urgencia(p.fecha).peso <= 1).length,
+    pendientesTop: [...accionables.pendientes]
+      .sort((a, b) => urgencia(a.fecha).peso - urgencia(b.fecha).peso)
+      .slice(0, 3)
+      .map((p) => `${p.emoji} ${urgencia(p.fecha).tag}${recortar(p.texto, 90)} (${p.origen})`),
+    gruposConNovedades: resumenesChats.filter((g) => g.temas.length).length,
+    nSinResponder: (sinResponder?.items || []).length,
+    nIntereses: coincidencias.length,
   };
   const texto = formatearDigest(accionables, resumenesChats, meta);
   // Saludos y charla de cortesía (relevancia 1) de las conversaciones no cuentan:
@@ -1030,8 +1059,8 @@ async function resumenPeriodo(horas) {
       } catch (err) {
         console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message);
       }
-      postNtfy(`Resumen ${labelHoras}`, texto, opcionesNtfy(analisis.meta));
-      await guardarReporte(`periodo_${horas}h`, texto, todos.length, totalTemas);
+      const idReporte = await guardarReporte(`periodo_${horas}h`, texto, todos.length, totalTemas);
+      notificarResumen({ texto, meta: analisis.meta, totalTemas, idReporte, etiqueta: labelHoras });
     });
   } catch (err) {
     console.error(`[Resumen ${labelHoras}] Error general:`, err.message);
@@ -1130,9 +1159,9 @@ async function generarDigest(etiqueta) {
       } catch (err) {
         console.error(`[Digest] No se pudo enviar (WA no conectado):`, err.message);
       }
-      postNtfy(`Resumen ${etiqueta || ''}`.trim() || 'Resumen', texto, opcionesNtfy(meta));
+      const idReporte = await guardarReporte('digest', texto, todos.length, totalTemas);
+      notificarResumen({ texto, meta, totalTemas, idReporte, etiqueta });
       if (!enviado) alertar('envio', 'No pude mandarte el resumen por WhatsApp', 'El resumen de arriba no llegó por WhatsApp. Revisá el panel: puede que haya que vincular de nuevo.', 3);
-      await guardarReporte('digest', texto, todos.length, totalTemas);
 
       // Solo marcamos procesados si el envío salió bien; si falló, los mensajes
       // quedan pendientes y el contenido se reintenta en el próximo digest (no se pierde).

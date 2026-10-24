@@ -12,7 +12,7 @@ process.env.GEMINI_API_KEY = 'x';
 process.env.TURSO_URL = 'x';
 process.env.TURSO_TOKEN = 'x';
 process.env.MY_WHATSAPP_ID = '5491100000000@c.us';
-delete process.env.NTFY_TOPIC;
+process.env.NTFY_TOPIC = 'tema-de-prueba';
 process.env.PUBLIC_URL = 'https://bot.ejemplo.com';
 process.env.PANEL_KEY = 'clave-de-prueba';
 
@@ -28,12 +28,13 @@ agregar('r@g.us', NOMBRE_ROPERITO, 'Laura', 'Alguien tiene un cochecito para ven
 agregar('e@g.us', '5° GRADO MIXTO', 'Seño', 'Mañana acto a las 9');
 agregar('p@s.whatsapp.net', 'Pedro', 'Pedro', 'Hola, venís el sábado?');
 
-const capturas = { opciones: {}, enviados: [], reportes: [], procesados: null, ajustes: {}, guardados: 0, limpiezas: 0, fallos: [] };
+const capturas = { ntfy: [], opciones: {}, enviados: [], reportes: [], procesados: null, ajustes: {}, guardados: 0, limpiezas: 0, fallos: [] };
 const item = (n, extra = {}) => ({ tema: `Art ${n}`, resumen: `Artículo ${n}, $${n}.000`, tipo: 'info', estado: 'informativo', relevancia: 2, para_mi: false, de: n % 2 ? 'Cintia' : 'Marta', ids: [1], clase: 'ofrecimiento', rubro: n % 2 ? 'Ropa' : 'Hogar', ...extra });
 const stubs = {
   dotenv: { config() {} },
   'node-cron': { schedule() {} },
   qrcode: {},
+  https: { request(opciones, cb) { const envio = { headers: opciones.headers, cuerpo: '' }; capturas.ntfy.push(envio); return { on() {}, write(b) { envio.cuerpo += b; }, end() { cb && cb({ statusCode: 200, resume() {} }); } }; } },
   http: { createServer(h) { capturas.handler = h; return { on() {}, listen(_p, cb) { cb && cb(); } }; } },
   './db': {
     conectar: async () => {},
@@ -148,12 +149,26 @@ test('el digest manda catálogo por clase y rubro, conversaciones, intereses y u
   assert.ok(auditado && auditado.contenido.includes('Novedades de tus grupos'), 'el digest enviado también se audita');
   assert.ok(!auditado.contenido.includes('clave-de-prueba'), 'el historial guarda la versión sin clave');
   assert.deepEqual(capturas.procesados.sort((a, b) => a - b), [1, 2, 3, 4]);
+
+  // ntfy: aviso corto con botón al resumen, no el texto entero
+  const aviso = capturas.ntfy.find((n) => /Resumen/.test(Buffer.from(n.headers.Title.slice(10, -2), 'base64').toString()));
+  assert.ok(aviso, 'se mandó una notificación de resumen');
+  const titulo = Buffer.from(aviso.headers.Title.slice(10, -2), 'base64').toString();
+  assert.match(titulo, /^(📌|🚨|✅) Resumen/);
+  assert.ok(aviso.cuerpo.length < 600, `el aviso es corto (${aviso.cuerpo.length} caracteres)`);
+  assert.doesNotMatch(aviso.cuerpo, /Artículo 1/);
+  assert.match(aviso.cuerpo, /📢 2 grupos con novedades/);
+  const id = capturas.reportes.findIndex((r) => r.tipo === 'digest') + 41;
+  assert.equal(aviso.headers.Actions, `view, Ver resumen, https://bot.ejemplo.com/reporte?id=${id}`);
+  assert.equal(aviso.headers.Click, `https://bot.ejemplo.com/reporte?id=${id}`);
+  assert.doesNotMatch(JSON.stringify(aviso), /clave-de-prueba/, 'ntfy nunca lleva la clave del panel');
 });
 
 test('/reporte?id=N muestra el detalle con formato y es seguro; un id inexistente da 404', async () => {
   const ok = await llamar('/reporte?id=41');
   assert.equal(ok.statusCode, 200);
   assert.match(ok.body, /<b>Detalle completo<\/b>/);
+  assert.ok((ok.body.match(/class="card contenido/g) || []).length >= 2, 'el resumen se ve como tarjetas por sección');
   assert.match(ok.body, /Artículo 24/);
   assert.doesNotMatch(ok.body, /<script>/);
   assert.equal((await llamar('/reporte?id=9999')).statusCode, 404);
