@@ -590,8 +590,24 @@ function leerCookie(req, nombre) {
 function textoParaWhatsApp(texto) {
   if (!clavePanel) return texto;
   const base = urlPublica().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const conClave = texto.replace(new RegExp(`${base}/reporte\\?id=(\\d+)`, 'g'), (_, id) => linkPanel(`/reporte?id=${id}`));
-  return `${conClave}\n\n⚙️ _Tu panel:_ ${linkPanel('/')}`;
+  return texto.replace(new RegExp(`${base}/reporte\\?id=(\\d+)`, 'g'), (_, id) => linkPanel(`/reporte?id=${id}`));
+}
+
+/**
+ * Manda un resumen a WhatsApp y, justo después, el link del panel en un mensaje
+ * corto aparte: pegado al final de un resumen largo queda escondido bajo "Leer
+ * más". Devuelve si el resumen llegó; que falle el link no cambia eso.
+ */
+async function enviarResumen(texto) {
+  const ok = await enviarTextoLibre(textoParaWhatsApp(texto));
+  if (ok && clavePanel) {
+    try {
+      await enviarTextoLibre(`⚙️ *Tu panel:* ${linkPanel('/')}`);
+    } catch (err) {
+      console.error(`[Panel] No se pudo mandar el link tras el resumen:`, err.message);
+    }
+  }
+  return ok;
 }
 
 let ultimoEnvioLink = 0;
@@ -1001,7 +1017,7 @@ async function resumenPeriodo(horas) {
         console.log(`[Resumen ${labelHoras}] Sin mensajes en el período`);
         const txt = `📋 *Resumen últimas ${labelHoras}*\n\nNo hay mensajes en este período.`;
         postNtfy(`Resumen ${labelHoras}`, txt, opcionesNtfy());
-        try { await enviarTextoLibre(textoParaWhatsApp(txt)); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message); }
+        try { await enviarResumen(txt); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message); }
         return;
       }
 
@@ -1009,7 +1025,7 @@ async function resumenPeriodo(horas) {
       const { totalTemas } = analisis;
       const texto = await adjuntarDetalle(analisis.texto, analisis.detalle, todos.length, totalTemas);
       try {
-        await enviarTextoLibre(textoParaWhatsApp(texto));
+        await enviarResumen(texto);
         console.log(`[Resumen ${labelHoras}] Enviado — ${totalTemas} temas`);
       } catch (err) {
         console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message);
@@ -1039,7 +1055,7 @@ async function enviarSinResponder() {
           ? `${formatearSinResponder(r)}\n\n_Últimos ${dias} días · chats individuales_`
           : `✅ No tenés chats individuales sin responder en los últimos ${dias} días.`;
       try {
-        await enviarTextoLibre(textoParaWhatsApp(texto));
+        await enviarResumen(texto);
       } catch (err) {
         console.error(`[Sin responder] Error enviando WA:`, err.message);
       }
@@ -1080,7 +1096,7 @@ async function generarDigest(etiqueta) {
         // notificar y ntfy quedaba mudo justo cuando WA fallaba en descifrar.
         postNtfy(`Resumen ${etiqueta || ''}`.trim() || 'Resumen', txt, opcionesNtfy());
         try {
-          const ok = await enviarTextoLibre(textoParaWhatsApp(txt));
+          const ok = await enviarResumen(txt);
           if (ok) await guardarReporte('digest', txt, 0, sinResp.items.length);
         } catch (err) {
           console.error(`[Digest] No se pudo enviar (WA no conectado):`, err.message);
@@ -1110,7 +1126,7 @@ async function generarDigest(etiqueta) {
 
       let enviado = false;
       try {
-        enviado = await enviarTextoLibre(textoParaWhatsApp(texto));
+        enviado = await enviarResumen(texto);
       } catch (err) {
         console.error(`[Digest] No se pudo enviar (WA no conectado):`, err.message);
       }

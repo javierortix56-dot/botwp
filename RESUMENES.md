@@ -21,7 +21,7 @@
 ## Panel y costos
 
 - **Panel** (`/`): estado en vivo (conexión, último y próximo resumen, mensajes en espera, uso de Gemini del día), resúmenes a demanda (lo nuevo, 24 h, 3 días, 7 días), chats sin responder, historial, configuración, prueba y re-vinculación. Las acciones largas corren en segundo plano y la página responde al instante.
-- **Acceso**: privado con clave; el link llega al final de cada resumen de WhatsApp. Re-vincular WhatsApp ya no requiere reiniciar Render: borra la sesión y muestra el QR solo.
+- **Acceso**: privado con clave; el link llega en un mensaje corto aparte justo después de cada resumen de WhatsApp (pegado al final de un resumen largo quedaba escondido bajo «Leer más»). Re-vincular WhatsApp ya no requiere reiniciar Render: borra la sesión y muestra el QR solo.
 - **Alertas ntfy**: prioridad según urgencia (alta si hay algo para HOY o vencido, baja si está todo tranquilo), tocar la notificación abre el panel, y avisos urgentes si WhatsApp se desvincula o un resumen no se pudo mandar.
 - **Gemini gratis**: uso típico ~20-30 consultas por día contra un tope propio de 900 (el gratuito de Google es ~1000). Si se agota, el resumen lo dice y los mensajes quedan para el siguiente.
 

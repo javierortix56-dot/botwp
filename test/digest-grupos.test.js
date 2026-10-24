@@ -111,7 +111,7 @@ test('el digest manda catálogo por clase y rubro, conversaciones, intereses y u
   const pagina = await llamar('/procesar');
   assert.match(pagina.body, /Preparando tu resumen/, 'responde al toque y trabaja en segundo plano');
   await esperar(() => capturas.procesados);
-  assert.equal(capturas.enviados.length, 1);
+  assert.equal(capturas.enviados.length, 2, 'el resumen y, aparte, el link del panel');
   const texto = capturas.enviados[0];
 
   assert.deepEqual(capturas.opciones[NOMBRE_ROPERITO], { modo: 'catalogo', detalle: 'alto', intereses: ['cochecito'] });
@@ -136,7 +136,9 @@ test('el digest manda catálogo por clase y rubro, conversaciones, intereses y u
   assert.ok(texto.indexOf('Tus conversaciones') < texto.indexOf('mensajes revisados'), 'las conversaciones van antes del pie');
   assert.ok((texto.match(/━━━━━━━━━━━━━━/g) || []).length >= 4, 'secciones separadas');
 
-  assert.match(texto, /🔎 \*Detalle completo de los grupos:\*\nhttps:\/\/bot\.ejemplo\.com\/reporte\?id=41&k=clave-de-prueba\n\n⚙️ _Tu panel:_ https:\/\/bot\.ejemplo\.com\/\?k=clave-de-prueba$/, 'en WhatsApp los links llevan la clave');
+  assert.match(texto, /🔎 \*Detalle completo de los grupos:\*\nhttps:\/\/bot\.ejemplo\.com\/reporte\?id=41&k=clave-de-prueba$/, 'en WhatsApp el link al detalle lleva la clave');
+  assert.doesNotMatch(texto, /Tu panel/, 'el link del panel ya no va pegado al resumen');
+  assert.equal(capturas.enviados[1], '⚙️ *Tu panel:* https://bot.ejemplo.com/?k=clave-de-prueba', 'va en un mensaje corto justo después');
   const detalle = capturas.reportes.find((r) => r.tipo === 'detalle');
   assert.ok(detalle, 'se guardó el detalle completo');
   assert.equal((detalle.contenido.match(/^• Artículo/gm) || []).length, 24, 'el detalle tiene los 24 artículos');
