@@ -97,7 +97,13 @@ test('una respuesta inválida se reintenta una vez; si vuelve a fallar, el error
   } finally {
     console.error = original;
   }
-  assert.match(errores.join('\n'), /tema 1: id 99 no está en los mensajes/);
+  assert.match(errores.join('\n'), /tema 1: ningún id está en los mensajes \(99\)/);
+});
+
+test('un id de más (rango inventado) se descarta y el tema se conserva con los ids reales', async () => {
+  const r = await analizarConversacion('SX Papis', [mensaje(1), mensaje(3)], async () => JSON.stringify([tema([1, 2, 3])]), config);
+  assert.equal(r.errores, 0);
+  assert.deepEqual(r.temas[0].ids, [1, 3]);
 });
 
 test('los intereses pasados por opciones llegan al prompt', async () => {

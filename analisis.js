@@ -24,8 +24,7 @@ function motivoInvalido(t, evidencia) {
   const noTexto = ['accion', 'de', 'fecha_limite'].find(k => t[k] != null && typeof t[k] !== 'string');
   if (noTexto) return `${noTexto} no es texto`;
   if (!Array.isArray(t.ids) || !t.ids.length) return 'sin ids de evidencia';
-  const ajeno = t.ids.find(id => !evidencia.has(id));
-  if (ajeno !== undefined) return `id ${ajeno} no está en los mensajes`;
+  if (!t.ids.some(id => evidencia.has(id))) return `ningún id está en los mensajes (${t.ids.slice(0, 3).join(', ')})`;
   return null;
 }
 
@@ -36,7 +35,11 @@ function interpretarRespuesta(respuesta, evidencia) {
   return parsed.map((t, i) => {
     const motivo = motivoInvalido(t, evidencia);
     if (motivo) throw new Error(`Tema sin esquema o evidencia válida (tema ${i + 1}: ${motivo})`);
-    return { ...t, para_mi: t.para_mi === true, me_piden: t.para_mi === true,
+    // Gemini a veces cita un rango de ids (15830-15836) y se cuela uno que no le
+    // pasamos: se descarta ese id y el tema sigue valiendo por los ids reales.
+    const ids = t.ids.filter(id => evidencia.has(id));
+    if (ids.length < t.ids.length) console.warn(`[Análisis] Tema "${t.tema}": ids ignorados por no estar en los mensajes: ${t.ids.filter(id => !evidencia.has(id)).join(', ')}`);
+    return { ...t, ids, para_mi: t.para_mi === true, me_piden: t.para_mi === true,
       clase: CLASES.includes(t.clase) ? t.clase : null, rubro: texto(t.rubro), categoria: texto(t.categoria),
       esperando_respuesta: t.esperando_respuesta === true,
       relevancia: [1, 2, 3].includes(t.relevancia) ? t.relevancia : 1 };
