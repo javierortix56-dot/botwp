@@ -30,12 +30,10 @@ test('modo catálogo: el prompt pide un ítem por artículo con clase y rubro', 
   assert.equal(r.temas[0].rubro, 'Bicis');
 });
 
-test('una clase desconocida se descarta sin invalidar el chat; un rubro que no es texto sí lo invalida', async () => {
+test('una clase desconocida se descarta sin invalidar el chat', async () => {
   const ok = await analizarConversacion('G', [mensaje(1)], async () => JSON.stringify([tema([1], { clase: 'inventada' })]), config);
   assert.equal(ok.errores, 0);
   assert.equal(ok.temas[0].clase, null);
-  const mal = await analizarConversacion('G', [mensaje(1)], async () => JSON.stringify([tema([1], { rubro: 7 })]), config);
-  assert.equal(mal.errores, 1);
 });
 
 test('individuales: el prompt explica esperando_respuesta y que los saludos son relevancia 1', async () => {
@@ -77,9 +75,29 @@ test('detalle normal: la charla de relevancia 1 va a "menores", no a temas', asy
   assert.deepEqual(r.menores.map((t) => t.resumen), ['Charla menor']);
 });
 
-test('una categoría que no es texto invalida la respuesta', async () => {
-  const r = await analizarConversacion('Roperito', [mensaje(1)], async () => JSON.stringify([tema([1], { categoria: 5 })]), config, false, { modo: 'catalogo' });
-  assert.equal(r.errores, 1);
+test('campos de presentación con formato raro se ignoran sin perder el chat', async () => {
+  const r = await analizarConversacion('Roperito', [mensaje(1)], async () => JSON.stringify([tema([1], { categoria: 5, rubro: ['x'], clase: 3, esperando_respuesta: 'si' })]), config, false, { modo: 'catalogo' });
+  assert.equal(r.errores, 0);
+  assert.deepEqual([r.temas[0].categoria, r.temas[0].rubro, r.temas[0].clase, r.temas[0].esperando_respuesta], [null, null, null, false]);
+});
+
+test('una respuesta inválida se reintenta una vez; si vuelve a fallar, el error dice el motivo', async () => {
+  let n = 0;
+  const ok = await analizarConversacion('G', [mensaje(1)], async () => (++n === 1 ? 'no es json' : JSON.stringify([tema([1])])), config);
+  assert.equal(n, 2);
+  assert.equal(ok.errores, 0);
+  assert.equal(ok.temas.length, 1);
+
+  const errores = [];
+  const original = console.error;
+  console.error = (...a) => errores.push(a.join(' '));
+  try {
+    const mal = await analizarConversacion('G', [mensaje(1)], async () => JSON.stringify([tema([99])]), config);
+    assert.equal(mal.errores, 1);
+  } finally {
+    console.error = original;
+  }
+  assert.match(errores.join('\n'), /tema 1: id 99 no está en los mensajes/);
 });
 
 test('los intereses pasados por opciones llegan al prompt', async () => {
