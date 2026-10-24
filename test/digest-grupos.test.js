@@ -25,6 +25,7 @@ const agregar = (chat_id, chat_nombre, remitente, cuerpo) => mensajes.push({ id:
 agregar('r@g.us', NOMBRE_ROPERITO, 'Cintia', 'Vendo bici de nena usada $30.000');
 agregar('r@g.us', NOMBRE_ROPERITO, 'Laura', 'Alguien tiene un cochecito para vender?');
 agregar('e@g.us', '5° GRADO MIXTO', 'Seño', 'Mañana acto a las 9');
+agregar('p@s.whatsapp.net', 'Pedro', 'Pedro', 'Hola, venís el sábado?');
 
 const capturas = { opciones: {}, enviados: [], reportes: [], procesados: null };
 const item = (n, extra = {}) => ({ tema: `Art ${n}`, resumen: `Artículo ${n}, $${n}.000`, tipo: 'info', estado: 'informativo', relevancia: 2, para_mi: false, de: n % 2 ? 'Cintia' : 'Marta', ids: [1], categoria: 'venta', ...extra });
@@ -61,7 +62,7 @@ const stubs = {
       if (nombre === NOMBRE_ROPERITO) return { temas: Array.from({ length: 24 }, (_, i) => item(i + 1)), menores: [], idsProcesados: msgs.map((m) => m.id), errores: 0 };
       return { temas: [item(1, { tema: 'Acto', resumen: 'Acto escolar mañana a las 9', de: 'Seño' })], menores: [{ ...item(2), relevancia: 1, resumen: 'Saludos varios' }], idsProcesados: msgs.map((m) => m.id), errores: 0 };
     },
-    analizarIndividuales: async () => ({ eventos: [], compromisos: [], pedidos: [], conversaciones: [], idsProcesados: [], errores: 0 }),
+    analizarIndividuales: async (msgs, _contactos, opciones) => { capturas.opcionesIndividuales = opciones; return { eventos: [], compromisos: [], pedidos: [], conversaciones: [], idsProcesados: msgs.map((m) => m.id), errores: 0 }; },
     generarTitular: async () => 'Hay novedades en los grupos.',
     filtrarSinResponder: async () => [],
   },
@@ -73,7 +74,9 @@ Module._load = function (pedido, ...resto) {
 require('../index.js');
 Module._load = original;
 // filtros.js recarga config.json al cargarse: hay que tocar el objeto que usa index.js (el que quedó en caché).
-require('../config.json').resumen.intereses = ['cochecito'];
+const cfgEnUso = require('../config.json');
+cfgEnUso.resumen.intereses = ['cochecito'];
+cfgEnUso.resumen.max_items_catalogo = 20; // en producción el tope es más alto; acá probamos el link de overflow
 
 function llamar(url, method = 'GET', cuerpo = null) {
   const req = new EventEmitter();
@@ -92,7 +95,8 @@ test('el digest manda catálogo por vendedor, intereses y un link al detalle com
   const texto = capturas.enviados[0];
 
   assert.deepEqual(capturas.opciones[NOMBRE_ROPERITO], { modo: 'catalogo', detalle: 'alto', intereses: ['cochecito'] });
-  assert.deepEqual(capturas.opciones['5° GRADO MIXTO'], { modo: 'normal', detalle: 'normal', intereses: ['cochecito'] });
+  assert.deepEqual(capturas.opciones['5° GRADO MIXTO'], { modo: 'normal', detalle: 'alto', intereses: ['cochecito'] });
+  assert.deepEqual(capturas.opcionesIndividuales, { detalle: 'alto' }, 'los chats individuales también van con detalle alto');
 
   assert.match(texto, /📢 \*Novedades de tus grupos\*/);
   assert.match(texto, /🛍️ \*Roperito St\. Xavier\.[^*]*\* — 24 publicaciones/);
@@ -111,7 +115,7 @@ test('el digest manda catálogo por vendedor, intereses y un link al detalle com
   assert.equal((detalle.contenido.match(/^• Artículo/gm) || []).length, 24, 'el detalle tiene los 24 artículos');
   assert.match(detalle.contenido, /Saludos varios/);
   assert.ok(capturas.reportes.some((r) => r.tipo === 'digest' && r.contenido === texto), 'el digest enviado también se audita');
-  assert.deepEqual(capturas.procesados.sort((a, b) => a - b), [1, 2, 3]);
+  assert.deepEqual(capturas.procesados.sort((a, b) => a - b), [1, 2, 3, 4]);
 });
 
 test('/reporte?id=N muestra el detalle con formato y es seguro; un id inexistente da 404', async () => {
@@ -145,10 +149,10 @@ test('/configurar muestra modo y detalle, y guardar no los pierde', async () => 
     const nueva = JSON.parse(fs.readFileSync(RUTA_CONFIG, 'utf8'));
     assert.deepEqual(nueva.grupos, [
       { nombre: NOMBRE_ROPERITO, frecuencia_horas: 8, modo: 'catalogo', detalle: 'alto' },
-      { nombre: '5° GRADO MIXTO', frecuencia_horas: 8 },
+      { nombre: '5° GRADO MIXTO', frecuencia_horas: 8, detalle: 'normal' },
     ]);
     assert.deepEqual(nueva.resumen.intereses, ['cochecito', 'bici', 'talle 10']);
-    assert.equal(nueva.resumen.max_temas_grupo_alto, 12, 'el resto de la config se conserva');
+    assert.equal(nueva.resumen.max_temas_grupo_alto, 40, 'el resto de la config se conserva');
   } finally {
     fs.writeFileSync(RUTA_CONFIG, configOriginal);
   }

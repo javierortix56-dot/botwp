@@ -63,12 +63,12 @@ async function analizarMensajes(mensajes) {
   return { temas, idsProcesados };
 }
 
-async function analizarIndividuales(mensajes, contactos = new Map()) {
+async function analizarIndividuales(mensajes, contactos = new Map(), opciones = {}) {
   const { agrupar, analizarConversacion } = require('./analisis');
   const salida = { eventos: [], compromisos: [], pedidos: [], conversaciones: [], idsProcesados: [], errores: 0 };
   for (const [chatId, lista] of agrupar(mensajes)) {
     const nombre = contactos.get(chatId) || lista.find(m => !m.es_propio)?.remitente || chatId;
-    const r = await analizarConversacion(nombre, lista, callGemini, config, true);
+    const r = await analizarConversacion(nombre, lista, callGemini, config, true, opciones);
     salida.idsProcesados.push(...r.idsProcesados);
     salida.errores += r.errores;
     salida.conversaciones.push({ chatNombre: nombre, temas: r.temas });

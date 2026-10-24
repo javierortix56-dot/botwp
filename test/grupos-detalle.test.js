@@ -6,7 +6,7 @@ const Module = require('node:module');
 const { DatabaseSync } = require('node:sqlite');
 
 const { analizarConversacion } = require('../analisis');
-const { obtenerOpcionesGrupo, buscarIntereses } = require('../filtros');
+const { obtenerOpcionesGrupo, detalleDefecto, buscarIntereses } = require('../filtros');
 const { seccionGrupos, formatearIntereses, formatearDetalle, htmlDesdeTexto, MAX_INTERESES_WA } = require('../formato');
 
 const config = { nombre_dueno: 'JO', max_mensajes_por_batch: 25 };
@@ -68,11 +68,48 @@ test('los intereses pasados por opciones llegan al prompt', async () => {
 
 // ── filtros: opciones por grupo e intereses ─────────────────────────────────
 
-test('el Roperito está configurado como catálogo con detalle alto; el resto, normal', () => {
+test('el Roperito es catálogo; el detalle es alto por defecto y se puede bajar por grupo', () => {
   assert.deepEqual(obtenerOpcionesGrupo('Roperito St. Xavier. (PÁG. Amarillas )'), { modo: 'catalogo', detalle: 'alto' });
-  assert.deepEqual(obtenerOpcionesGrupo('5° GRADO MIXTO'), { modo: 'normal', detalle: 'normal' });
-  assert.deepEqual(obtenerOpcionesGrupo('Grupo que no existe'), { modo: 'normal', detalle: 'normal' });
-  assert.deepEqual(obtenerOpcionesGrupo(null), { modo: 'normal', detalle: 'normal' });
+  assert.deepEqual(obtenerOpcionesGrupo('5° GRADO MIXTO'), { modo: 'normal', detalle: 'alto' });
+  assert.deepEqual(obtenerOpcionesGrupo('Grupo que no existe'), { modo: 'normal', detalle: 'alto' });
+  assert.deepEqual(obtenerOpcionesGrupo(null), { modo: 'normal', detalle: 'alto' });
+  assert.equal(detalleDefecto(), 'alto');
+});
+
+test('un grupo con detalle "normal" explícito lo conserva; sin detalle_defecto todo es normal', () => {
+  const original = Module._load;
+  const filtrosPath = require.resolve('../filtros');
+  const cargarConConfig = (cfg) => {
+    Module._load = function (pedido, ...resto) {
+      return pedido === './config.json' ? cfg : original.call(this, pedido, ...resto);
+    };
+    delete require.cache[filtrosPath];
+    return require('../filtros');
+  };
+  const base = { vips: [], keywords: [], grupos: [{ nombre: 'Grupo callado', detalle: 'normal' }, { nombre: 'Otro' }] };
+  try {
+    const conAlto = cargarConConfig({ ...base, resumen: { detalle_defecto: 'alto' } });
+    assert.equal(conAlto.obtenerOpcionesGrupo('Grupo callado').detalle, 'normal');
+    assert.equal(conAlto.obtenerOpcionesGrupo('Otro').detalle, 'alto');
+    const sinDefecto = cargarConConfig({ ...base, resumen: {} });
+    assert.equal(sinDefecto.obtenerOpcionesGrupo('Otro').detalle, 'normal');
+    assert.equal(sinDefecto.detalleDefecto(), 'normal');
+  } finally {
+    Module._load = original;
+    delete require.cache[filtrosPath];
+  }
+});
+
+test('el prompt de detalle alto pide no filtrar por interés', async () => {
+  let prompt = '';
+  await analizarConversacion('Grupo', [mensaje(1)], async (p) => { prompt = p; return '[]'; }, config, false, { detalle: 'alto' });
+  assert.match(prompt, /No filtres por interés ni por relevancia personal de JO/);
+  assert.doesNotMatch(prompt, /\{YO\}/);
+});
+
+test('chats individuales con detalle alto también conservan la relevancia 1', async () => {
+  const r = await analizarConversacion('Ana', [mensaje(1, { chat_id: 'a@s.whatsapp.net' })], async () => JSON.stringify([tema([1], { relevancia: 1, resumen: 'Charla menor' })]), config, true, { detalle: 'alto' });
+  assert.equal(r.temas.length, 1);
 });
 
 test('intereses: sin acentos ni mayúsculas, desde inicio de palabra, sin falsos positivos', () => {
