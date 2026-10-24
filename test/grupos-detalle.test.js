@@ -282,6 +282,9 @@ test('sinRelleno saca "Se vende/Se comparte/Se alquila" del principio, y 💻 pa
   assert.equal(sinRelleno('Alquiler temporario en Canning'), 'Alquiler temporario en Canning');
   assert.equal(sinRelleno('Sesión de fotos'), 'Sesión de fotos');
   assert.equal(iconoRubro('Tecnología'), '💻');
+  assert.equal(iconoRubro('Electrónica'), '💻');
+  assert.equal(iconoRubro('Electrodomésticos'), '🛋️');
+  assert.equal(iconoRubro('Inmuebles'), '🏠');
   const t = seccionGrupos([catalogo([tema([1], { de: 'Raquel', resumen: 'Se vende aire LIKON, $350.000', clase: 'ofrecimiento', rubro: 'Hogar' })])]).texto;
   assert.match(t, /• Aire LIKON, \*\$350\.000\* — \*Raquel\*/);
 });
