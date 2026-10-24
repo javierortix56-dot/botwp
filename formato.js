@@ -53,7 +53,8 @@ const ICONOS_RUBRO = [
   [/alquil|inmueble|casa|depto|departamento|vivienda|propiedad|quinta/, '🏠'],
   [/ropa|indument|calzado|zapat|uniforme|vestim/, '👕'],
   [/comida|aliment|torta|dulce|paste|galleta|cocina|reposter|vianda/, '🍪'],
-  [/electro|hogar|mueble|deco|aire acond/, '🛋️'],
+  [/tecnolog|electronic|compu|notebook|chromebook|celular|tablet/, '💻'],
+  [/electrodom|hogar|mueble|deco|aire acond/, '🛋️'],
   [/servic|oficio|repar|tecnic|clase|profe/, '🛠️'],
   [/escuel|colegio|util|libro|escolar|educ/, '📚'],
   [/juguet|beb|nin|infantil/, '🧸'],
@@ -62,7 +63,6 @@ const ICONOS_RUBRO = [
   [/salud|belleza|estetic|medic/, '💆'],
   [/viaje|turismo|vacacion/, '✈️'],
   [/deporte|futbol|camiseta/, '⚽'],
-  [/tecnolog|compu|notebook|chromebook|celular|tablet|electronic/, '💻'],
 ];
 
 function iconoRubro(rubro) {
