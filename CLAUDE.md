@@ -25,7 +25,9 @@ index.js       → arranque, inicializa todo, corre el cron
 whatsapp.js    → leer mensajes, enviar resumen
 gemini.js      → llamadas a Gemini API
 db.js          → todas las operaciones con Turso
-filtros.js     → lógica de VIPs y palabras clave
+filtros.js     → lógica de VIPs y palabras clave, opciones por grupo e intereses
+formato.js     → formato puro de la sección de grupos, intereses y detalle (con tests)
+analisis.js    → motor de análisis por conversación (estado consolidado por chat)
 config.json    → configuración editable por el usuario
 .env           → API keys (nunca tocar ni subir a GitHub)
 ```

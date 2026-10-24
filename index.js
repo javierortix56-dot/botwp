@@ -36,6 +36,7 @@ const {
   obtenerContactos,
   guardarReporte,
   obtenerReportes,
+  obtenerReporte,
 } = require('./db');
 const {
   iniciarCliente,
@@ -46,7 +47,7 @@ const {
   esperarSincronizacion,
 } = require('./whatsapp');
 const { analizarChat, analizarIndividuales, generarTitular, filtrarSinResponder } = require('./gemini');
-const { recargar: recargarFiltros } = require('./filtros');
+const { recargar: recargarFiltros, obtenerOpcionesGrupo, buscarIntereses } = require('./filtros');
 
 let config = require('./config.json');
 
@@ -207,7 +208,7 @@ function extraerAccionables(resumenesChats, resIndiv, contactos) {
  *  - "👥 De los grupos": info útil, máximo 3 ítems por grupo para no hacer ruido
  */
 function formatearDigest(accionables, resumenesChats, meta = {}) {
-  const { etiqueta, totalMensajes = 0, titular = '', seccionSinResponder = '' } = meta;
+  const { etiqueta, totalMensajes = 0, titular = '', seccionSinResponder = '', seccionIntereses = '' } = meta;
   const { pendientes, agenda } = accionables;
 
   const nombre = (config.nombre_dueno || '').trim();
@@ -239,6 +240,11 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
     out.push(seccionSinResponder);
   }
 
+  if (seccionIntereses) {
+    out.push('');
+    out.push(seccionIntereses);
+  }
+
   if (agenda.length) {
     const ordenada = [...agenda].sort((a, b) => {
       const ka = a.fecha ? `${a.fecha.iso} ${a.fecha.hora || ''}` : '9999';
@@ -256,42 +262,40 @@ function formatearDigest(accionables, resumenesChats, meta = {}) {
     });
   }
 
-  // De qué se habló: resumen de TODOS los temas de cada grupo (aunque no sean
-  // para JO), un renglón por tema, agrupados bajo el nombre del grupo.
-  // Tope configurable por grupo para no inflar el mensaje si un grupo explotó.
-  const maxTemasGrupo = Math.min(config.resumen?.max_temas_grupo ?? 5, 5);
-  const bloquesGrupo = [];
-  for (const { chatNombre, temas } of resumenesChats) {
-    const vistosInfo = new Set();
-    const infos = temas
-      .filter((t) => !(t.para_mi && t.estado === 'pendiente' && ['accion', 'pago', 'evento'].includes(t.tipo)))
-      .sort((a, b) => b.relevancia - a.relevancia)
-      .filter((t) => {
-        const k = normalizarClave(t.resumen);
-        if (k && vistosInfo.has(k)) return false;
-        if (k) vistosInfo.add(k);
-        return true;
-      });
-    if (!infos.length) continue;
-    const mostrados = infos.slice(0, maxTemasGrupo);
-    const lineas = [`*${chatNombre}*`];
-    mostrados.forEach((t) => lineas.push(`• ${t.resumen}`));
-    if (infos.length > maxTemasGrupo) {
-      lineas.push(`_…y ${infos.length - maxTemasGrupo} tema(s) más_`);
-    }
-    bloquesGrupo.push(lineas.join('\n'));
-  }
-  if (bloquesGrupo.length) {
+  // Novedades de los grupos (versión resumida; la completa va al detalle web)
+  const grupos = seccionGrupos(resumenesChats);
+  if (grupos.texto) {
     out.push('');
     out.push('📢 *Novedades de tus grupos*');
     out.push('');
-    out.push(bloquesGrupo.join('\n\n'));
+    out.push(grupos.texto);
   }
 
   out.push('');
   out.push(`_${totalMensajes} mensajes revisados_`);
 
   return out.join('\n').trim();
+}
+
+// Formato de la sección de grupos, intereses y detalle: ver formato.js
+const formato = require('./formato');
+const { MAX_INTERESES_WA, formatearIntereses, htmlDesdeTexto } = formato;
+const seccionGrupos = (resumenesChats, opciones) => formato.seccionGrupos(resumenesChats, { ...opciones, limites: config.resumen });
+const formatearDetalle = (resumenesChats, coincidencias, etiqueta) => formato.formatearDetalle(resumenesChats, coincidencias, etiqueta, config.resumen);
+
+function urlPublica() {
+  return (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'https://botwp-ikbb.onrender.com').replace(/\/$/, '');
+}
+
+/**
+ * Guarda el detalle completo como reporte y devuelve el texto de WhatsApp con el
+ * link al final. Si no hay detalle (o no se pudo guardar) devuelve el texto tal cual.
+ */
+async function adjuntarDetalle(texto, detalle, nMensajes, nTemas) {
+  if (!detalle) return texto;
+  const id = await guardarReporte('detalle', detalle, nMensajes, nTemas);
+  if (!id) return texto;
+  return `${texto}\n\n🔎 *Detalle completo de los grupos:*\n${urlPublica()}/reporte?id=${id}`;
 }
 
 // "hace 5 h" / "hace 1 día" / "hace 3 días"
@@ -460,7 +464,9 @@ function generarPaginaConfiguracion(chatsDB, configActual, contactos, mensaje) {
   (configActual.grupos || []).forEach((g) => {
     const nombre = typeof g === 'string' ? g : g.nombre;
     const frecuencia = typeof g === 'string' ? 0 : (g.frecuencia_horas || 0);
-    gruposConfigurados.set(nombre.toLowerCase().trim(), { nombre, frecuencia });
+    const modo = typeof g === 'string' ? undefined : g.modo;
+    const detalle = typeof g === 'string' ? undefined : g.detalle;
+    gruposConfigurados.set(nombre.toLowerCase().trim(), { nombre, frecuencia, modo, detalle });
   });
 
   // Unir chats de DB con los ya configurados
@@ -478,6 +484,8 @@ function generarPaginaConfiguracion(chatsDB, configActual, contactos, mensaje) {
       chat_nombre: nombreLegible,
       cantidad: row.cantidad || 0,
       frecuencia: conf ? conf.frecuencia : 0,
+      modo: conf?.modo,
+      detalle: conf?.detalle,
     });
   }
 
@@ -489,6 +497,8 @@ function generarPaginaConfiguracion(chatsDB, configActual, contactos, mensaje) {
         chat_nombre: conf.nombre,
         cantidad: 0,
         frecuencia: conf.frecuencia,
+        modo: conf.modo,
+        detalle: conf.detalle,
       });
     }
   }
@@ -510,6 +520,12 @@ function generarPaginaConfiguracion(chatsDB, configActual, contactos, mensaje) {
     return `<select name="freq_${key}" style="padding:4px 8px;border-radius:4px;border:1px solid #ccc">${opts}</select>`;
   }
 
+  function selectOpcion(prefijo, chatNombre, actual, opciones) {
+    const key = encodeURIComponent(chatNombre);
+    const opts = opciones.map(([valor, label]) => `<option value="${valor}"${valor === (actual || opciones[0][0]) ? ' selected' : ''}>${label}</option>`).join('');
+    return `<select name="${prefijo}_${key}" style="padding:4px 8px;border-radius:4px;border:1px solid #ccc">${opts}</select>`;
+  }
+
   const filas = chats.map((c) => {
     const esGrupo = c.chat_id ? c.chat_id.endsWith('@g.us') : true;
     const tipoTag = esGrupo ? '<span style="font-size:.75rem;background:#e8f4fd;color:#1a73e8;padding:2px 6px;border-radius:10px;margin-left:6px">Grupo</span>' : '<span style="font-size:.75rem;background:#f0fdf4;color:#16a34a;padding:2px 6px;border-radius:10px;margin-left:6px">Individual</span>';
@@ -517,6 +533,8 @@ function generarPaginaConfiguracion(chatsDB, configActual, contactos, mensaje) {
       <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${c.chat_nombre}${tipoTag}</td>
       <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0;text-align:center;color:#888">${c.cantidad}</td>
       <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${selectFrecuencia(c.chat_nombre, c.frecuencia)}</td>
+      <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${esGrupo ? selectOpcion('modo', c.chat_nombre, c.modo, [['normal', 'Normal'], ['catalogo', 'Catálogo (compraventa)']]) : '—'}</td>
+      <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${esGrupo ? selectOpcion('det', c.chat_nombre, c.detalle, [['normal', 'Normal'], ['alto', 'Alto']]) : '—'}</td>
     </tr>`;
   }).join('');
 
@@ -537,6 +555,8 @@ function generarPaginaConfiguracion(chatsDB, configActual, contactos, mensaje) {
     .subtitle { color: #888; font-size: .9rem; margin-bottom: 24px; }
     label { font-weight: 600; display: block; margin-bottom: 6px; }
     input[type=text] { width: 100%; box-sizing: border-box; padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; margin-bottom: 20px; }
+    textarea { width: 100%; box-sizing: border-box; padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; margin-bottom: 20px; font-family: inherit; }
+    .ayuda { color: #888; font-size: .8rem; margin: -14px 0 20px; }
     table { width: 100%; border-collapse: collapse; margin-top: 8px; }
     th { text-align: left; padding: 10px 12px; background: #f8f9fa; font-size: .85rem; color: #555; border-bottom: 2px solid #e0e0e0; }
     .btn { display: inline-block; padding: 10px 28px; background: #075e54; color: #fff; border: none; border-radius: 6px; font-size: 1rem; cursor: pointer; margin-top: 20px; }
@@ -553,6 +573,9 @@ function generarPaginaConfiguracion(chatsDB, configActual, contactos, mensaje) {
     <form method="POST" action="/configurar">
       <label for="nombre_dueno">Tu nombre (opcional — para personalizar los resúmenes)</label>
       <input type="text" id="nombre_dueno" name="nombre_dueno" value="${(configActual.nombre_dueno || '').replace(/"/g, '&quot;')}" placeholder="Ej: Martín">
+      <label for="intereses">Mis intereses (alerta cuando alguien los menciona en cualquier chat)</label>
+      <textarea id="intereses" name="intereses" rows="2" placeholder="Ej: cochecito, bicicleta, talle 10">${(configActual.resumen?.intereses || []).join(', ').replace(/&/g, '&amp;').replace(/</g, '&lt;')}</textarea>
+      <p class="ayuda">Separalos con coma. Modo "Catálogo": para grupos de compraventa, lista cada artículo por vendedor. Detalle "Alto": no descarta ofertas ni temas menores.</p>
       <label>Chats con mensajes recientes (últimos 30 días)</label>
       <table>
         <thead>
@@ -560,10 +583,12 @@ function generarPaginaConfiguracion(chatsDB, configActual, contactos, mensaje) {
             <th>Chat</th>
             <th style="text-align:center">Mensajes</th>
             <th>Frecuencia</th>
+            <th>Modo</th>
+            <th>Detalle</th>
           </tr>
         </thead>
         <tbody>
-          ${filas || '<tr><td colspan="3" style="padding:20px;text-align:center;color:#888">No hay mensajes recientes en la base de datos.</td></tr>'}
+          ${filas || '<tr><td colspan="5" style="padding:20px;text-align:center;color:#888">No hay mensajes recientes en la base de datos.</td></tr>'}
         </tbody>
       </table>
       <button type="submit" class="btn">💾 Guardar configuración</button>
@@ -671,6 +696,24 @@ function iniciarServidor() {
       return;
     }
 
+    // GET /reporte?id=N — un reporte puntual (ej. el detalle completo de un digest)
+    if (req.url?.startsWith('/reporte?') && req.method === 'GET') {
+      try {
+        const id = Number(new URL(req.url, 'http://localhost').searchParams.get('id'));
+        const r = Number.isInteger(id) && id > 0 ? await obtenerReporte(id) : null;
+        if (!r) {
+          res.statusCode = 404;
+          res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>Reporte no encontrado</h2><a href="/reportes">← Ver reportes</a></body></html>`);
+          return;
+        }
+        const fecha = new Date(r.creado_en * 1000).toLocaleString('es-AR', { timeZone: TZ });
+        res.end(`<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Detalle completo</title></head><body style="font-family:-apple-system,Segoe UI,sans-serif;background:#f0f2f5;margin:0;padding:20px 12px;color:#111"><div style="max-width:720px;margin:0 auto"><a href="/reportes" style="color:#075e54;text-decoration:none;font-size:.9rem">← Reportes</a><div style="color:#888;font-size:.8rem;margin-top:8px">${fecha} · ${r.tipo || 'reporte'}</div><div style="background:#fff;border-radius:12px;padding:20px;margin-top:8px;box-shadow:0 2px 12px rgba(0,0,0,.08);line-height:1.55;font-size:1rem;white-space:pre-wrap;word-break:break-word">${htmlDesdeTexto(r.contenido)}</div></div></body></html>`);
+      } catch (err) {
+        res.end(`<p>Error: ${err.message}</p>`);
+      }
+      return;
+    }
+
     // GET /configurar — página de configuración de chats
     if (req.url === '/configurar' && req.method === 'GET') {
       try {
@@ -698,8 +741,14 @@ function iniciarServidor() {
           if (!key.startsWith('freq_')) continue;
           const frecuencia = parseInt(value, 10);
           if (isNaN(frecuencia) || frecuencia <= 0) continue; // Desactivado o inválido
-          const chatNombre = decodeURIComponent(key.slice(5)); // quitar prefijo "freq_"
-          nuevosGrupos.push({ nombre: chatNombre, frecuencia_horas: frecuencia });
+          const sufijo = key.slice(5); // quitar prefijo "freq_"
+          const chatNombre = decodeURIComponent(sufijo);
+          nuevosGrupos.push({
+            nombre: chatNombre,
+            frecuencia_horas: frecuencia,
+            ...(params.get(`modo_${sufijo}`) === 'catalogo' ? { modo: 'catalogo' } : {}),
+            ...(params.get(`det_${sufijo}`) === 'alto' ? { detalle: 'alto' } : {}),
+          });
         }
 
         // Leer config actual y actualizarla
@@ -707,6 +756,10 @@ function iniciarServidor() {
         const configActual = JSON.parse(fs.readFileSync(configPath, 'utf8'));
         configActual.nombre_dueno = nombreDueno;
         configActual.grupos = nuevosGrupos;
+        if (params.has('intereses')) {
+          configActual.resumen = configActual.resumen || {};
+          configActual.resumen.intereses = params.get('intereses').split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+        }
 
         fs.writeFileSync(configPath, JSON.stringify(configActual, null, 2), 'utf8');
         recargarConfig();
@@ -793,10 +846,11 @@ async function analizarLote(todos, etiqueta, sinResponder = null) {
     const chatNombre = mensajesChat[0].chat_nombre || chatId;
     console.log(`[Análisis${etiqueta ? ' ' + etiqueta : ''}] "${chatNombre}" (${mensajesChat.length} mensajes)`);
     try {
-      const { temas, idsProcesados: ids, errores } = await analizarChat(chatNombre, mensajesChat);
+      const opciones = obtenerOpcionesGrupo(chatNombre);
+      const { temas, menores = [], idsProcesados: ids, errores } = await analizarChat(chatNombre, mensajesChat, { ...opciones, intereses: config.resumen?.intereses });
       idsProcesados.push(...ids);
       erroresAnalisis += errores || 0;
-      if (temas.length) resumenesChats.push({ chatNombre, temas });
+      if (temas.length || menores.length) resumenesChats.push({ chatNombre, temas, menores, ...opciones });
     } catch (err) {
       erroresAnalisis++;
       console.error(`[Análisis] Error analizando "${chatNombre}":`, err.message);
@@ -829,11 +883,13 @@ async function analizarLote(todos, etiqueta, sinResponder = null) {
     titular = await generarTitular(itemsTitular);
   }
 
+  const coincidencias = buscarIntereses(todos, config.resumen?.intereses);
   const meta = {
     etiqueta,
     totalMensajes: todos.filter(m => !m.solo_contexto).length,
     titular,
     seccionSinResponder: formatearSinResponder(sinResponder || {}),
+    seccionIntereses: formatearIntereses(coincidencias),
   };
   const texto = formatearDigest(accionables, resumenesChats, meta);
   const conversaciones = (resIndiv.conversaciones || []).filter(c => c.temas.length);
@@ -841,9 +897,14 @@ async function analizarLote(todos, etiqueta, sinResponder = null) {
     ? '\n\n💬 *Tus conversaciones*\n' + conversaciones.map(c => `*${c.chatNombre}*\n${c.temas.slice(0, 3).map(t => '• ' + t.resumen).join('\n')}`).join('\n\n')
     : '';
   const totalTemas = resumenesChats.reduce((a, r) => a + r.temas.length, 0)
-    + conversaciones.reduce((n, c) => n + c.temas.length, 0);
+    + conversaciones.reduce((n, c) => n + c.temas.length, 0)
+    + coincidencias.length;
 
-  return { texto: texto + detalleConversaciones, idsProcesados, totalTemas, meta, erroresAnalisis };
+  // Detalle completo (página web): solo si el resumen de WhatsApp dejó cosas afuera.
+  const necesitaDetalle = seccionGrupos(resumenesChats).ocultos > 0 || coincidencias.length > MAX_INTERESES_WA;
+  const detalle = necesitaDetalle ? formatearDetalle(resumenesChats, coincidencias, etiqueta) : null;
+
+  return { texto: texto + detalleConversaciones, idsProcesados, totalTemas, meta, erroresAnalisis, detalle };
 }
 
 /**
@@ -865,7 +926,9 @@ async function resumenPeriodo(horas) {
         return;
       }
 
-      const { texto, totalTemas } = await analizarLote(todos, `últimas ${labelHoras}`);
+      const analisis = await analizarLote(todos, `últimas ${labelHoras}`);
+      const { totalTemas } = analisis;
+      const texto = await adjuntarDetalle(analisis.texto, analisis.detalle, todos.length, totalTemas);
       try {
         await enviarTextoLibre(texto);
         console.log(`[Resumen ${labelHoras}] Enviado — ${totalTemas} temas`);
@@ -946,7 +1009,7 @@ async function generarDigest(etiqueta) {
         return;
       }
 
-      let { texto, idsProcesados, totalTemas, erroresAnalisis } = await analizarLote(todos, etiqueta, sinResp);
+      let { texto, idsProcesados, totalTemas, erroresAnalisis, detalle } = await analizarLote(todos, etiqueta, sinResp);
 
       // Hubo mensajes pero nada relevante: mensaje corto en vez del esqueleto del digest.
       // Si además hubo errores de análisis, decirlo — antes un fallo total de Gemini
@@ -958,6 +1021,8 @@ async function generarDigest(etiqueta) {
             ? `✅ Revisé ${todos.length} mensajes nuevos y no hay novedades para vos.`
             : `✅ *Todo tranquilo* — revisé ${todos.length} mensajes y no hay nada pendiente para vos. Solo charla.`;
         if (seccionSinResp) texto += `\n\n${seccionSinResp}`;
+      } else {
+        texto = await adjuntarDetalle(texto, detalle, todos.length, totalTemas);
       }
 
       let enviado = false;

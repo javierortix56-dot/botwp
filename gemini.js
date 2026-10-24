@@ -22,8 +22,8 @@ async function callGemini(prompt, intento = 1) {
   }
 }
 
-async function analizarChat(chatNombre, mensajes) {
-  return require('./analisis').analizarConversacion(chatNombre, mensajes, callGemini, config);
+async function analizarChat(chatNombre, mensajes, opciones = {}) {
+  return require('./analisis').analizarConversacion(chatNombre, mensajes, callGemini, config, false, opciones);
 }
 
 /**
