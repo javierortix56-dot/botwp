@@ -62,6 +62,7 @@ const ICONOS_RUBRO = [
   [/salud|belleza|estetic|medic/, '💆'],
   [/viaje|turismo|vacacion/, '✈️'],
   [/deporte|futbol|camiseta/, '⚽'],
+  [/tecnolog|compu|notebook|chromebook|celular|tablet|electronic/, '💻'],
 ];
 
 function iconoRubro(rubro) {
@@ -109,9 +110,17 @@ function sinAutorAlInicio(resumen, autor) {
   return resto.charAt(0).toUpperCase() + resto.slice(1);
 }
 
+// "Se vende ...", "Se comparte ...": relleno al principio de un ofrecimiento o
+// pedido, que ya está bajo el encabezado "Ofrecen" / "Piden o buscan".
+function sinRelleno(resumen) {
+  const r = String(resumen || '').trim();
+  const sin = r.replace(/^se\s+(?:venden?|ofrecen?|comparten?|alquilan?|anuncian?|regalan?|buscan?|necesitan?|publican?)\s+(?:(?:una?|el|la|los|las)\s+)?/i, '');
+  return sin === r || !sin ? r : sin.charAt(0).toUpperCase() + sin.slice(1);
+}
+
 function lineaTema(t, { mostrarAutor = false, hoy } = {}) {
   const autor = mostrarAutor && t.de ? String(t.de).trim() : '';
-  const resumen = autor ? sinAutorAlInicio(t.resumen, autor) : String(t.resumen || '');
+  const resumen = mostrarAutor ? sinRelleno(autor ? sinAutorAlInicio(t.resumen, autor) : t.resumen) : String(t.resumen || '');
   if (t.estado === 'resuelto' && mostrarAutor) {
     return `• ~${resumen}~ _(ya no está)_${autor ? ` — *${autor}*` : ''}`;
   }
@@ -298,5 +307,5 @@ function htmlDesdeTexto(texto) {
 
 module.exports = {
   SEPARADOR, CLASES_VALIDAS, seccionGrupos, seccionConversaciones, formatearIntereses, formatearDetalle,
-  htmlDesdeTexto, resaltarPrecios, marcaFecha, iconoRubro, claseDe, MAX_INTERESES_WA,
+  htmlDesdeTexto, resaltarPrecios, marcaFecha, iconoRubro, claseDe, sinRelleno, MAX_INTERESES_WA,
 };

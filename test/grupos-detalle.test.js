@@ -7,7 +7,7 @@ const { DatabaseSync } = require('node:sqlite');
 
 const { analizarConversacion } = require('../analisis');
 const { obtenerOpcionesGrupo, detalleDefecto, buscarIntereses } = require('../filtros');
-const { seccionGrupos, seccionConversaciones, formatearIntereses, formatearDetalle, htmlDesdeTexto, resaltarPrecios, marcaFecha, MAX_INTERESES_WA } = require('../formato');
+const { seccionGrupos, seccionConversaciones, formatearIntereses, formatearDetalle, htmlDesdeTexto, resaltarPrecios, marcaFecha, sinRelleno, iconoRubro, MAX_INTERESES_WA } = require('../formato');
 
 const config = { nombre_dueno: 'JO', max_mensajes_por_batch: 25 };
 const mensaje = (id, extra = {}) => ({ id, chat_id: 'g@g.us', remitente: 'Cintia', cuerpo: 'Vendo bici', timestamp: 1789470000 + id, ...extra });
@@ -97,7 +97,20 @@ test('una respuesta inválida se reintenta una vez; si vuelve a fallar, el error
   } finally {
     console.error = original;
   }
-  assert.match(errores.join('\n'), /tema 1: ningún id está en los mensajes \(99\)/);
+  assert.match(errores.join('\n'), /ningún id está en los mensajes: tema 1 "Bici" \(ids 99\)/);
+});
+
+test('un tema que solo cita un id inexistente se descarta sin tirar el resto del chat', async () => {
+  let llamadas = 0;
+  const r = await analizarConversacion('SX Papis', [mensaje(1), mensaje(2)], async (p) => {
+    llamadas++;
+    assert.match(p, /nunca rangos ni ids inventados/);
+    return JSON.stringify([tema([15833], { resumen: 'Tema fantasma' }), tema([2], { resumen: 'El bingo podría hacerse hoy' })]);
+  }, config);
+  assert.equal(llamadas, 1, 'no hace falta reintentar');
+  assert.equal(r.errores, 0);
+  assert.deepEqual(r.temas.map((t) => t.resumen), ['El bingo podría hacerse hoy']);
+  assert.deepEqual(r.idsProcesados, [1, 2]);
 });
 
 test('un id de más (rango inventado) se descarta y el tema se conserva con los ids reales', async () => {
@@ -238,6 +251,17 @@ test('compatibilidad: la categoria vieja venta/busca se ubica como ofrecimiento/
   const t = seccionGrupos([catalogo([tema([1], { de: 'A', resumen: 'Bici', categoria: 'venta' }), tema([2], { de: 'B', resumen: 'Cochecito', categoria: 'busca' })])]).texto;
   assert.match(t, /🙋 \*Piden o buscan\*\n• Cochecito — \*B\*/);
   assert.match(t, /🎁 \*Ofrecen\*\n• Bici — \*A\*/);
+});
+
+test('sinRelleno saca "Se vende/Se comparte/Se alquila" del principio, y 💻 para tecnología', () => {
+  assert.equal(sinRelleno('Se vende aire acondicionado LIKON a $350.000'), 'Aire acondicionado LIKON a $350.000');
+  assert.equal(sinRelleno('Se comparte perfil de Instagram @drunkonia'), 'Perfil de Instagram @drunkonia');
+  assert.equal(sinRelleno('Se alquila una casa a la laguna'), 'Casa a la laguna');
+  assert.equal(sinRelleno('Alquiler temporario en Canning'), 'Alquiler temporario en Canning');
+  assert.equal(sinRelleno('Sesión de fotos'), 'Sesión de fotos');
+  assert.equal(iconoRubro('Tecnología'), '💻');
+  const t = seccionGrupos([catalogo([tema([1], { de: 'Raquel', resumen: 'Se vende aire LIKON, $350.000', clase: 'ofrecimiento', rubro: 'Hogar' })])]).texto;
+  assert.match(t, /• Aire LIKON, \*\$350\.000\* — \*Raquel\*/);
 });
 
 test('resaltarPrecios y marcaFecha', () => {
