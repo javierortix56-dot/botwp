@@ -33,7 +33,11 @@ function interpretarRespuesta(respuesta, evidencia) {
   const texto = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
   const temas = [];
   const sinEvidencia = [];
-  parsed.forEach((t, i) => {
+  parsed.forEach((original, i) => {
+    // Gemini a veces pone la clase en el tipo ("tipo": "social"): se acomoda.
+    const t = original && !TIPOS.includes(original.tipo) && CLASES.includes(original.tipo)
+      ? { ...original, clase: original.clase ?? original.tipo, tipo: 'info' }
+      : original;
     const motivo = motivoInvalido(t);
     if (motivo) throw new Error(`Tema sin esquema o evidencia válida (tema ${i + 1}: ${motivo})`);
     // Gemini a veces cita ids que no le pasamos (rangos, o un id fijo que repite

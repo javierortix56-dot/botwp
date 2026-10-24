@@ -100,6 +100,15 @@ test('una respuesta inválida se reintenta una vez; si vuelve a fallar, el error
   assert.match(errores.join('\n'), /ningún id está en los mensajes: tema 1 "Bici" \(ids 99\)/);
 });
 
+test('si Gemini pone la clase en el tipo ("tipo": "social"), se acomoda sin perder el chat', async () => {
+  const r = await analizarConversacion('SX Papis', [mensaje(1)], async () => JSON.stringify([tema([1], { tipo: 'social', resumen: 'Cumpleaños de Pepe' })]), config);
+  assert.equal(r.errores, 0);
+  assert.equal(r.temas[0].tipo, 'info');
+  assert.equal(r.temas[0].clase, 'social');
+  const mal = await analizarConversacion('G', [mensaje(1)], async () => JSON.stringify([tema([1], { tipo: 'cualquiera' })]), config);
+  assert.equal(mal.errores, 1, 'un tipo desconocido sigue siendo inválido');
+});
+
 test('un tema que solo cita un id inexistente se descarta sin tirar el resto del chat', async () => {
   let llamadas = 0;
   const r = await analizarConversacion('SX Papis', [mensaje(1), mensaje(2)], async (p) => {
@@ -245,6 +254,19 @@ test('grupo normal: secciones por clase, ❗ en lo importante y marcas de fecha'
 test('un chat con una sola clase no lleva encabezado de clase', () => {
   const t = seccionGrupos([{ chatNombre: 'Rosario', modo: 'normal', detalle: 'alto', menores: [], temas: [tema([1], { resumen: 'Salió el boletín', clase: 'aviso' })] }]).texto;
   assert.equal(t, '👥 *Rosario*\n• Salió el boletín');
+});
+
+test('catálogo: lo que el modelo marcó como aviso o sin clase va a "Ofrecen"; pedidos y eventos se respetan', () => {
+  const t = seccionGrupos([catalogo([
+    tema([1], { de: 'Belén', resumen: 'Casa a la laguna en San Rafael', clase: 'aviso', rubro: 'Alquileres' }),
+    tema([2], { de: 'Paola', resumen: 'Casa con pileta en Canning', rubro: 'Alquileres' }),
+    tema([3], { de: 'Lau', resumen: 'Service de aire', clase: 'solicitud', rubro: 'Servicios' }),
+    tema([4], { de: 'Ana', resumen: 'Feria del sábado', clase: 'evento' }),
+  ])]).texto;
+  assert.doesNotMatch(t, /Avisos/);
+  assert.match(t, /🎁 \*Ofrecen\*\n   🏠 _Alquileres_\n• Casa a la laguna en San Rafael — \*Belén\*\n• Casa con pileta en Canning — \*Paola\*/);
+  assert.match(t, /🙋 \*Piden o buscan\*/);
+  assert.match(t, /📅 \*Fechas y eventos\*\n• Feria del sábado/);
 });
 
 test('compatibilidad: la categoria vieja venta/busca se ubica como ofrecimiento/solicitud', () => {

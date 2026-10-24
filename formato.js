@@ -200,7 +200,10 @@ function seccionGrupos(resumenesChats, { completo = false, limites = {}, hoy } =
     const vigentes = catalogo ? infos.filter((t) => t.estado !== 'resuelto') : infos;
     const vendidos = catalogo ? infos.filter((t) => t.estado === 'resuelto') : [];
     const visibles = vigentes.slice(0, catalogo ? maxCatalogo : detalle === 'alto' ? maxAlto : maxNormal);
-    const lista = completo ? [...visibles, ...vendidos] : visibles;
+    // En un grupo de compraventa lo que no es un pedido, un evento o algo social
+    // es una publicación: si el modelo lo marcó como aviso o charla, va a "Ofrecen".
+    const comoCatalogo = (t) => (catalogo && ['aviso', 'charla', null].includes(claseDe(t)) ? { ...t, clase: 'ofrecimiento' } : t);
+    const lista = (completo ? [...visibles, ...vendidos] : visibles).map(comoCatalogo);
     if (!lista.length && !(completo && menores.length)) continue;
 
     const n = vigentes.length;
