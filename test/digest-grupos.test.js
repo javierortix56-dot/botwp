@@ -1,6 +1,6 @@
 // Punta a punta: corre el digest real de index.js con WhatsApp, base de datos y
 // Gemini simulados, y verifica el mensaje que se enviaría, el detalle guardado
-// y las páginas /reporte y /configurar.
+// y las páginas del panel (acceso con clave, inicio, /reporte, /configurar).
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const Module = require('node:module');
@@ -14,6 +14,7 @@ process.env.TURSO_TOKEN = 'x';
 process.env.MY_WHATSAPP_ID = '5491100000000@c.us';
 delete process.env.NTFY_TOPIC;
 process.env.PUBLIC_URL = 'https://bot.ejemplo.com';
+process.env.PANEL_KEY = 'clave-de-prueba';
 
 const RUTA_CONFIG = path.join(__dirname, '../config.json');
 const configOriginal = fs.readFileSync(RUTA_CONFIG, 'utf8');
@@ -27,7 +28,7 @@ agregar('r@g.us', NOMBRE_ROPERITO, 'Laura', 'Alguien tiene un cochecito para ven
 agregar('e@g.us', '5° GRADO MIXTO', 'Seño', 'Mañana acto a las 9');
 agregar('p@s.whatsapp.net', 'Pedro', 'Pedro', 'Hola, venís el sábado?');
 
-const capturas = { opciones: {}, enviados: [], reportes: [], procesados: null };
+const capturas = { opciones: {}, enviados: [], reportes: [], procesados: null, ajustes: {}, guardados: 0, limpiezas: 0, fallos: [] };
 const item = (n, extra = {}) => ({ tema: `Art ${n}`, resumen: `Artículo ${n}, $${n}.000`, tipo: 'info', estado: 'informativo', relevancia: 2, para_mi: false, de: n % 2 ? 'Cintia' : 'Marta', ids: [1], clase: 'ofrecimiento', rubro: n % 2 ? 'Ropa' : 'Hogar', ...extra });
 const stubs = {
   dotenv: { config() {} },
@@ -40,13 +41,18 @@ const stubs = {
     obtenerMensajesDesde: async () => mensajes,
     obtenerChatsSinResponder: async () => [],
     marcarProcesados: async (ids) => { capturas.procesados = ids; },
-    guardarMensaje: async () => true,
-    limpiarAuth: async () => {},
+    guardarMensaje: async () => { capturas.guardados++; return true; },
+    limpiarAuth: async () => { capturas.limpiezas++; },
     obtenerChatsDistintos: async () => [{ chat_id: 'r@g.us', chat_nombre: NOMBRE_ROPERITO, cantidad: 2 }, { chat_id: 'e@g.us', chat_nombre: '5° GRADO MIXTO', cantidad: 1 }],
     obtenerContactos: async () => new Map(),
     guardarReporte: async (tipo, contenido) => { capturas.reportes.push({ tipo, contenido }); return 40 + capturas.reportes.length; },
     obtenerReportes: async () => [],
     obtenerReporte: async (n) => capturas.reportes.map((r, i) => ({ ...r, id: 41 + i, n_mensajes: 0, n_temas: 0, creado_en: 1789470000 })).find((r) => r.id === n) || null,
+    registrarFallos: async (ids) => { capturas.fallos.push(...ids); return 0; },
+    contarPendientes: async () => 7,
+    obtenerAjuste: async (k) => capturas.ajustes[k] ?? null,
+    guardarAjuste: async (k, v) => { capturas.ajustes[k] = v; return true; },
+    ultimoReporte: async () => ({ id: 1, tipo: 'digest', creado_en: Math.floor(Date.now() / 1000) - 7200 }),
   },
   './whatsapp': {
     iniciarCliente: async (cb) => { cb.onListo && cb.onListo(); },
@@ -65,6 +71,8 @@ const stubs = {
     analizarIndividuales: async (msgs, _contactos, opciones) => { capturas.opcionesIndividuales = opciones; return { eventos: [], compromisos: [], pedidos: [], conversaciones: [{ chatNombre: 'Pedro', temas: [{ ...item(1), clase: null, rubro: null, resumen: 'Preguntaste si viene el sábado', esperando_respuesta: true }, { ...item(2), clase: null, rubro: null, relevancia: 1, resumen: 'Te saludó' }], menores: [] }], idsProcesados: msgs.map((m) => m.id), errores: 0 }; },
     generarTitular: async () => 'Hay novedades en los grupos.',
     filtrarSinResponder: async () => [],
+    usoGemini: () => ({ dia: '2026-10-24', total: 3, limite: 900, por_tipo: { analisis: 3 } }),
+    cargarUsoGuardado: async () => {},
   },
 };
 const original = Module._load;
@@ -78,19 +86,31 @@ const cfgEnUso = require('../config.json');
 cfgEnUso.resumen.intereses = ['cochecito'];
 cfgEnUso.resumen.max_items_catalogo = 20; // en producción el tope es más alto; acá probamos el link de overflow
 
-function llamar(url, method = 'GET', cuerpo = null) {
+const COOKIE = 'botwp_k=clave-de-prueba';
+function llamar(url, method = 'GET', cuerpo = null, { cookie = COOKIE } = {}) {
   const req = new EventEmitter();
   req.url = url;
   req.method = method;
+  req.headers = cookie ? { cookie } : {};
   const res = { statusCode: 200, headers: {}, setHeader(k, v) { this.headers[k] = v; }, writeHead(c) { this.statusCode = c; }, end(b) { this.body = b; } };
   const hecho = Promise.resolve(capturas.handler(req, res));
   if (cuerpo !== null) setImmediate(() => { req.emit('data', Buffer.from(cuerpo)); req.emit('end'); });
   return hecho.then(() => res);
 }
 
+async function esperar(cond, ms = 3000) {
+  const fin = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > fin) throw new Error('timeout esperando condición');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 test('el digest manda catálogo por clase y rubro, conversaciones, intereses y un link al detalle completo', async () => {
   await new Promise((r) => setTimeout(r, 50)); // main(): estado conectado
-  await llamar('/procesar');
+  const pagina = await llamar('/procesar');
+  assert.match(pagina.body, /Preparando tu resumen/, 'responde al toque y trabaja en segundo plano');
+  await esperar(() => capturas.procesados);
   assert.equal(capturas.enviados.length, 1);
   const texto = capturas.enviados[0];
 
@@ -116,13 +136,15 @@ test('el digest manda catálogo por clase y rubro, conversaciones, intereses y u
   assert.ok(texto.indexOf('Tus conversaciones') < texto.indexOf('mensajes revisados'), 'las conversaciones van antes del pie');
   assert.ok((texto.match(/━━━━━━━━━━━━━━/g) || []).length >= 4, 'secciones separadas');
 
-  assert.match(texto, /🔎 \*Detalle completo de los grupos:\*\nhttps:\/\/bot\.ejemplo\.com\/reporte\?id=41$/);
+  assert.match(texto, /🔎 \*Detalle completo de los grupos:\*\nhttps:\/\/bot\.ejemplo\.com\/reporte\?id=41&k=clave-de-prueba\n\n⚙️ _Tu panel:_ https:\/\/bot\.ejemplo\.com\/\?k=clave-de-prueba$/, 'en WhatsApp los links llevan la clave');
   const detalle = capturas.reportes.find((r) => r.tipo === 'detalle');
   assert.ok(detalle, 'se guardó el detalle completo');
   assert.equal((detalle.contenido.match(/^• Artículo/gm) || []).length, 24, 'el detalle tiene los 24 artículos');
   assert.match(detalle.contenido, /Saludos varios/);
   assert.match(detalle.contenido, /◦ Te saludó/, 'el saludo queda en el detalle');
-  assert.ok(capturas.reportes.some((r) => r.tipo === 'digest' && r.contenido === texto), 'el digest enviado también se audita');
+  const auditado = capturas.reportes.find((r) => r.tipo === 'digest');
+  assert.ok(auditado && auditado.contenido.includes('Novedades de tus grupos'), 'el digest enviado también se audita');
+  assert.ok(!auditado.contenido.includes('clave-de-prueba'), 'el historial guarda la versión sin clave');
   assert.deepEqual(capturas.procesados.sort((a, b) => a - b), [1, 2, 3, 4]);
 });
 
@@ -161,7 +183,72 @@ test('/configurar muestra modo y detalle, y guardar no los pierde', async () => 
     ]);
     assert.deepEqual(nueva.resumen.intereses, ['cochecito', 'bici', 'talle 10']);
     assert.equal(nueva.resumen.max_temas_grupo_alto, 40, 'el resto de la config se conserva');
+    assert.deepEqual(capturas.ajustes.config_usuario, {
+      nombre_dueno: 'JO',
+      grupos: nueva.grupos,
+      intereses: ['cochecito', 'bici', 'talle 10'],
+    }, 'se guarda en Turso para sobrevivir a los deploys');
   } finally {
     fs.writeFileSync(RUTA_CONFIG, configOriginal);
   }
+});
+
+test('sin la clave el panel no muestra nada privado', async () => {
+  for (const ruta of ['/', '/reportes', '/reporte?id=41', '/configurar', '/procesar']) {
+    const r = await llamar(ruta, 'GET', null, { cookie: null });
+    assert.equal(r.statusCode, ruta === '/' ? 200 : 401, ruta);
+    assert.match(r.body, /Panel privado/);
+    assert.doesNotMatch(r.body, /Artículo|Roperito/);
+  }
+  const otra = await llamar('/reportes', 'GET', null, { cookie: 'botwp_k=otra-clave' });
+  assert.equal(otra.statusCode, 401, 'una clave equivocada tampoco entra');
+});
+
+test('el link con la clave guarda la cookie por un año y la saca de la URL', async () => {
+  const r = await llamar('/reporte?id=41&k=clave-de-prueba', 'GET', null, { cookie: null });
+  assert.equal(r.statusCode, 302);
+  assert.equal(r.headers.Location, '/reporte?id=41');
+  assert.match(r.headers['Set-Cookie'], /^botwp_k=clave-de-prueba; Max-Age=31536000; Path=\/; HttpOnly; SameSite=Lax; Secure$/);
+  const mala = await llamar('/reportes?k=adivinando', 'GET', null, { cookie: null });
+  assert.equal(mala.statusCode, 401);
+});
+
+test('"mandame el link" lo envía solo al WhatsApp del dueño, como mucho uno cada 10 minutos', async () => {
+  const antes = capturas.enviados.length;
+  const r = await llamar('/enviar-link', 'POST', '', { cookie: null });
+  assert.match(r.body, /te mandé el link/);
+  assert.equal(capturas.enviados.length, antes + 1);
+  assert.match(capturas.enviados.at(-1), /Tu acceso al panel de BotWP\*\nhttps:\/\/bot\.ejemplo\.com\/\?k=clave-de-prueba/);
+  const otra = await llamar('/enviar-link', 'POST', '', { cookie: null });
+  assert.match(otra.body, /Ya te mandé un link/);
+  assert.equal(capturas.enviados.length, antes + 1);
+});
+
+test('el inicio muestra el estado real del bot', async () => {
+  const r = await llamar('/');
+  assert.equal(r.statusCode, 200);
+  assert.match(r.body, /Hola, JO/);
+  assert.match(r.body, /WhatsApp conectado/);
+  assert.match(r.body, /hace 2 h/);
+  assert.match(r.body, /<b>7<\/b>/, 'mensajes en espera');
+  assert.match(r.body, /<b>3 <small[^>]*>\/ 900<\/small><\/b>/, 'uso de Gemini');
+  assert.match(r.body, /(hoy|mañana) \d\d:\d\d/, 'próximo resumen');
+});
+
+test('la prueba manda un mensaje real y ya no ensucia la base con un chat falso', async () => {
+  const antes = capturas.enviados.length;
+  const r = await llamar('/test');
+  assert.match(r.body, /Prueba enviada/);
+  await esperar(() => capturas.enviados.length > antes);
+  assert.match(capturas.enviados.at(-1), /Prueba de BotWP/);
+  assert.equal(capturas.guardados, 0);
+});
+
+test('re-vincular pide confirmación y solo borra la sesión con POST', async () => {
+  const pagina = await llamar('/sesion');
+  assert.match(pagina.body, /method="POST" action="\/sesion"/);
+  assert.equal(capturas.limpiezas, 0);
+  const hecho = await llamar('/sesion', 'POST', '');
+  assert.match(hecho.body, /Sesión reiniciada/);
+  assert.equal(capturas.limpiezas, 1);
 });

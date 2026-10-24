@@ -24,6 +24,8 @@ const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
 const QRCode = require('qrcode');
+const nodeCrypto = require('crypto');
+const panel = require('./panel');
 const {
   conectar,
   obtenerMensajesSinProcesar,
@@ -37,6 +39,11 @@ const {
   guardarReporte,
   obtenerReportes,
   obtenerReporte,
+  registrarFallos,
+  contarPendientes,
+  obtenerAjuste,
+  guardarAjuste,
+  ultimoReporte,
 } = require('./db');
 const {
   iniciarCliente,
@@ -46,8 +53,8 @@ const {
   desconectar: desconectarWA,
   esperarSincronizacion,
 } = require('./whatsapp');
-const { analizarChat, analizarIndividuales, generarTitular, filtrarSinResponder } = require('./gemini');
-const { recargar: recargarFiltros, obtenerOpcionesGrupo, detalleDefecto, buscarIntereses } = require('./filtros');
+const { analizarChat, analizarIndividuales, generarTitular, filtrarSinResponder, usoGemini, cargarUsoGuardado } = require('./gemini');
+const { recargar: recargarFiltros, obtenerOpcionesGrupo, detalleDefecto, buscarIntereses, esTrivial } = require('./filtros');
 
 let config = require('./config.json');
 
@@ -55,10 +62,13 @@ const https = require('https');
 
 const PORT = process.env.PORT || 3000;
 
+// Recarga config.json sobre el MISMO objeto: whatsapp.js y gemini.js guardan
+// una referencia a él y tienen que ver los cambios sin reiniciar.
 function recargarConfig() {
   try {
-    delete require.cache[require.resolve('./config.json')];
-    config = require('./config.json');
+    const nuevo = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
+    for (const k of Object.keys(config)) delete config[k];
+    Object.assign(config, nuevo);
     recargarFiltros(); // que el filtro de captura use los grupos/VIPs nuevos sin reiniciar
     console.log(`[Config] Recargada`);
   } catch (err) {
@@ -66,23 +76,37 @@ function recargarConfig() {
   }
 }
 
-function postNtfy(title, body) {
+// Texto de WhatsApp (*negrita*, _cursiva_, ~tachado~) a texto plano para ntfy.
+function textoPlano(texto) {
+  return String(texto || '').replace(/(^|[\s(])[*_~]([^*_~\n]+)[*_~](?=$|[\s).,;:!?])/gm, '$1$2');
+}
+
+/**
+ * Notificación push por ntfy. opciones: prioridad (min|low|default|high|urgent),
+ * tags (emojis de ntfy), click (URL al tocar la notificación).
+ * El título va codificado (RFC 2047) para admitir acentos y emojis, y el
+ * cuerpo se recorta a ~3.8 KB: más largo, ntfy lo manda como archivo adjunto.
+ */
+function postNtfy(title, body, { prioridad = 'default', tags = [], click } = {}) {
   if (!process.env.NTFY_TOPIC) {
     console.warn(`[ntfy] NTFY_TOPIC no configurado — notificación "${title}" omitida`);
     return;
   }
-  const buf = Buffer.from(body);
-  const req = https.request({
-    hostname: 'ntfy.sh',
-    path: `/${process.env.NTFY_TOPIC}`,
-    method: 'POST',
-    headers: {
-      'Title': title,
-      'Priority': 'high',
-      'Content-Type': 'text/plain',
-      'Content-Length': buf.length,
-    },
-  }, (res) => {
+  let texto = textoPlano(body);
+  if (Buffer.byteLength(texto) > 3800) {
+    while (Buffer.byteLength(texto) > 3700) texto = texto.slice(0, Math.floor(texto.length * 0.95));
+    texto = `${texto.trimEnd()}\n\n… (sigue en el panel)`;
+  }
+  const buf = Buffer.from(texto);
+  const headers = {
+    'Title': `=?UTF-8?B?${Buffer.from(String(title)).toString('base64')}?=`,
+    'Priority': prioridad,
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Content-Length': buf.length,
+  };
+  if (tags.length) headers.Tags = tags.join(',');
+  if (click) headers.Click = click;
+  const req = https.request({ hostname: 'ntfy.sh', path: `/${process.env.NTFY_TOPIC}`, method: 'POST', headers }, (res) => {
     if (res.statusCode >= 200 && res.statusCode < 300) {
       console.log(`[ntfy] Notificación "${title}" enviada (${res.statusCode})`);
     } else {
@@ -93,6 +117,34 @@ function postNtfy(title, body) {
   req.on('error', (err) => console.error(`[ntfy] Error:`, err.message));
   req.write(buf);
   req.end();
+}
+
+// Alertas proactivas por ntfy (sesión caída, cuota agotada...), como mucho una
+// cada `horas` por tipo para no saturar.
+const ultimasAlertas = new Map();
+function alertar(tipo, titulo, texto, horas = 6) {
+  const antes = ultimasAlertas.get(tipo) || 0;
+  if (Date.now() - antes < horas * 3600 * 1000) return;
+  ultimasAlertas.set(tipo, Date.now());
+  postNtfy(titulo, texto, { prioridad: 'urgent', tags: ['warning'], click: urlPublica() });
+}
+
+// Prioridad de la notificación según lo que trae el resumen.
+function opcionesNtfy(meta = {}) {
+  if (meta.urgentes > 0) return { prioridad: 'high', tags: ['rotating_light'], click: urlPublica() };
+  if (meta.pendientes > 0) return { prioridad: 'default', tags: ['pushpin'], click: urlPublica() };
+  return { prioridad: 'low', tags: ['white_check_mark'], click: urlPublica() };
+}
+
+async function enviarPrueba() {
+  const hora = new Date().toLocaleTimeString('es-AR', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+  const texto = `🔔 *Prueba de BotWP* — ${hora}\nSi leés esto, el bot puede escribirte. Los resúmenes llegan a las ${(config.resumen?.horas_digest || []).map((e) => { const m = /^(\d+)\s+(\d+)/.exec(e); return m ? `${m[2].padStart(2, '0')}:${m[1].padStart(2, '0')}` : e; }).join(' y ')}.`;
+  try {
+    await enviarTextoLibre(texto);
+  } catch (err) {
+    console.error('[Prueba] No se pudo enviar por WhatsApp:', err.message);
+  }
+  postNtfy('Prueba de BotWP', texto, { prioridad: 'default', tags: ['bell'], click: urlPublica() });
 }
 
 function resolverNombreIndiv(raw, contactos) {
@@ -465,358 +517,358 @@ function nombreParaChat(chatId, chatNombreDB, contactos) {
   return chatNombreDB || chatId;
 }
 
-function generarPaginaConfiguracion(chatsDB, configActual, contactos, mensaje) {
-  const gruposConfigurados = new Map();
+// Arma la lista de chats para la página de configuración: los de la base de
+// los últimos 30 días más los configurados que no tuvieron mensajes.
+function armarChatsConfig(chatsDB, configActual, contactos) {
+  const configurados = new Map();
   (configActual.grupos || []).forEach((g) => {
     const nombre = typeof g === 'string' ? g : g.nombre;
-    const frecuencia = typeof g === 'string' ? 0 : (g.frecuencia_horas || 0);
-    const modo = typeof g === 'string' ? undefined : g.modo;
-    const detalle = typeof g === 'string' ? undefined : g.detalle;
-    gruposConfigurados.set(nombre.toLowerCase().trim(), { nombre, frecuencia, modo, detalle });
+    configurados.set(nombre.toLowerCase().trim(), typeof g === 'string'
+      ? { nombre, frecuencia: 0 }
+      : { nombre, frecuencia: g.frecuencia_horas || 0, modo: g.modo, detalle: g.detalle });
   });
-
-  // Unir chats de DB con los ya configurados
-  const chatKeys = new Set();
+  const vistos = new Set();
   const chats = [];
-
   for (const row of chatsDB) {
-    const nombreLegible = nombreParaChat(row.chat_id, row.chat_nombre, contactos);
-    const key = nombreLegible.toLowerCase().trim();
-    if (!key || chatKeys.has(key)) continue;
-    chatKeys.add(key);
-    const conf = gruposConfigurados.get(key);
-    chats.push({
-      chat_id: row.chat_id,
-      chat_nombre: nombreLegible,
-      cantidad: row.cantidad || 0,
-      frecuencia: conf ? conf.frecuencia : 0,
-      modo: conf?.modo,
-      detalle: conf?.detalle,
-    });
+    const nombre = nombreParaChat(row.chat_id, row.chat_nombre, contactos);
+    const key = nombre.toLowerCase().trim();
+    if (!key || vistos.has(key)) continue;
+    vistos.add(key);
+    const conf = configurados.get(key);
+    chats.push({ chat_nombre: nombre, cantidad: row.cantidad || 0, frecuencia: conf?.frecuencia || 0, modo: conf?.modo, detalle: conf?.detalle, esGrupo: row.chat_id ? row.chat_id.endsWith('@g.us') : true });
   }
+  for (const [key, conf] of configurados) {
+    if (!vistos.has(key)) chats.push({ chat_nombre: conf.nombre, cantidad: 0, frecuencia: conf.frecuencia, modo: conf.modo, detalle: conf.detalle, esGrupo: true });
+  }
+  return chats;
+}
 
-  // Agregar chats configurados que no tienen mensajes recientes
-  for (const [key, conf] of gruposConfigurados) {
-    if (!chatKeys.has(key)) {
-      chats.push({
-        chat_id: null,
-        chat_nombre: conf.nombre,
-        cantidad: 0,
-        frecuencia: conf.frecuencia,
-        modo: conf.modo,
-        detalle: conf.detalle,
-      });
+// ── Acceso al panel ─────────────────────────────────────────────────────────
+// El panel muestra chats privados y puede borrar la sesión: se protege con una
+// clave larga (env PANEL_KEY, o una generada y guardada en Turso). El link con
+// la clave llega al final de cada resumen de WhatsApp; al abrirlo queda una
+// cookie por un año. Sin clave, el panel ofrece mandar el link al WhatsApp del
+// dueño (nunca a otro número).
+
+let clavePanel = null;
+const COOKIE_PANEL = 'botwp_k';
+
+async function prepararClavePanel() {
+  if (process.env.PANEL_KEY) {
+    clavePanel = process.env.PANEL_KEY;
+    return;
+  }
+  let clave = await obtenerAjuste('panel_key');
+  if (!clave) {
+    clave = nodeCrypto.randomBytes(18).toString('base64url');
+    if (await guardarAjuste('panel_key', clave)) {
+      console.log(`[Panel] Clave de acceso creada. Link del panel: ${linkPanel('/', clave)}`);
     }
   }
+  clavePanel = clave;
+}
 
-  const opcionesFrecuencia = [
-    { valor: 0, label: 'Desactivado' },
-    { valor: 1, label: 'Cada hora' },
-    { valor: 8, label: 'Cada 8 horas' },
-    { valor: 12, label: 'Dos veces al día' },
-    { valor: 24, label: 'Diario' },
-  ];
+function linkPanel(ruta = '/', clave = clavePanel) {
+  return `${urlPublica()}${ruta}${ruta.includes('?') ? '&' : '?'}k=${encodeURIComponent(clave || '')}`;
+}
 
-  function selectFrecuencia(chatNombre, frecuenciaActual) {
-    const key = encodeURIComponent(chatNombre);
-    const opts = opcionesFrecuencia.map((o) => {
-      const sel = o.valor === frecuenciaActual ? ' selected' : '';
-      return `<option value="${o.valor}"${sel}>${o.label}</option>`;
-    }).join('');
-    return `<select name="freq_${key}" style="padding:4px 8px;border-radius:4px;border:1px solid #ccc">${opts}</select>`;
+function claveValida(dada) {
+  if (!clavePanel || typeof dada !== 'string') return false;
+  const a = Buffer.from(dada);
+  const b = Buffer.from(clavePanel);
+  return a.length === b.length && nodeCrypto.timingSafeEqual(a, b);
+}
+
+function leerCookie(req, nombre) {
+  const m = new RegExp(`(?:^|;\\s*)${nombre}=([^;]+)`).exec(req.headers?.cookie || '');
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+// Versión del texto para WhatsApp: los links al detalle llevan la clave (el chat
+// con uno mismo es privado) y se agrega el acceso al panel. ntfy y el historial
+// guardan la versión sin clave.
+function textoParaWhatsApp(texto) {
+  if (!clavePanel) return texto;
+  const base = urlPublica().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const conClave = texto.replace(new RegExp(`${base}/reporte\\?id=(\\d+)`, 'g'), (_, id) => linkPanel(`/reporte?id=${id}`));
+  return `${conClave}\n\n⚙️ _Tu panel:_ ${linkPanel('/')}`;
+}
+
+let ultimoEnvioLink = 0;
+
+async function enviarLinkPanel() {
+  if (!clavePanel || Date.now() - ultimoEnvioLink < 10 * 60 * 1000) return 'espera';
+  ultimoEnvioLink = Date.now();
+  const texto = `🔑 *Tu acceso al panel de BotWP*\n${linkPanel('/')}\n\n_Abrilo desde el teléfono o la compu que vas a usar: queda guardado por un año._`;
+  let porWhatsApp = false;
+  if (estaConectado()) {
+    try { porWhatsApp = await enviarTextoLibre(texto); } catch (err) { console.error(`[Panel] No se pudo mandar el link por WhatsApp:`, err.message); }
   }
+  // ntfy solo como respaldo, cuando WhatsApp no está disponible.
+  if (!porWhatsApp) postNtfy('Acceso al panel de BotWP', texto.replace(/[*_]/g, ''), { prioridad: 'high', click: linkPanel('/') });
+  console.log(`[Panel] Link de acceso enviado por ${porWhatsApp ? 'WhatsApp' : 'ntfy'}`);
+  return 'enviado';
+}
 
-  function selectOpcion(prefijo, chatNombre, actual, opciones) {
-    const key = encodeURIComponent(chatNombre);
-    const opts = opciones.map(([valor, label]) => `<option value="${valor}"${valor === (actual || opciones[0][0]) ? ' selected' : ''}>${label}</option>`).join('');
-    return `<select name="${prefijo}_${key}" style="padding:4px 8px;border-radius:4px;border:1px solid #ccc">${opts}</select>`;
+// ── Estado para el inicio del panel ─────────────────────────────────────────
+
+function haceCuantoCorto(ts) {
+  const min = Math.max(0, Math.floor((Date.now() / 1000 - Number(ts)) / 60));
+  if (min < 60) return `hace ${Math.max(min, 1)} min`;
+  const h = Math.floor(min / 60);
+  return h < 24 ? `hace ${h} h` : `hace ${Math.floor(h / 24)} d`;
+}
+
+// Próximo disparo de los crons "M H * * *" en hora de Argentina.
+function proximoDigest() {
+  const exprs = config.resumen?.horas_digest || ['0 11 * * *', '0 21 * * *'];
+  const horarios = exprs
+    .map((e) => /^(\d+)\s+(\d+)\s+\*\s+\*\s+\*$/.exec(String(e).trim()))
+    .filter(Boolean)
+    .map((m) => ({ h: Number(m[2]), m: Number(m[1]) }))
+    .sort((a, b) => a.h - b.h || a.m - b.m);
+  if (!horarios.length) return null;
+  const ahora = horaActual() * 60 + Number(new Date().toLocaleString('en-US', { timeZone: TZ, minute: 'numeric' }));
+  const hoy = horarios.find((x) => x.h * 60 + x.m > ahora);
+  const x = hoy || horarios[0];
+  return `${hoy ? 'hoy' : 'mañana'} ${String(x.h).padStart(2, '0')}:${String(x.m).padStart(2, '0')}`;
+}
+
+async function estadoPanel() {
+  const [ultimo, pendientes] = await Promise.all([ultimoReporte('digest'), contarPendientes()]);
+  return {
+    nombre: (config.nombre_dueno || '').trim(),
+    conexion: estadoWA === 'conectado' ? 'conectado' : estadoWA === 'standby' ? 'standby' : 'reconectando',
+    ultimoDigest: ultimo ? {
+      hace: haceCuantoCorto(ultimo.creado_en),
+      cuando: new Date(Number(ultimo.creado_en) * 1000).toLocaleString('es-AR', { timeZone: TZ, weekday: 'short', hour: '2-digit', minute: '2-digit' }),
+    } : null,
+    proximoDigest: proximoDigest(),
+    pendientes,
+    gemini: usoGemini(),
+    grupos: (config.grupos || []).length,
+  };
+}
+
+// ── Configuración persistente ───────────────────────────────────────────────
+// config.json vive en el disco efímero de Render: lo que se cambiaba desde el
+// panel se perdía en cada deploy. Ahora lo editable se guarda también en Turso
+// y se vuelve a aplicar al arrancar.
+
+const RUTA_CONFIG = path.join(__dirname, 'config.json');
+
+function aplicarConfigUsuario(cu) {
+  if (!cu || typeof cu !== 'object') return;
+  const actual = JSON.parse(fs.readFileSync(RUTA_CONFIG, 'utf8'));
+  if (typeof cu.nombre_dueno === 'string') actual.nombre_dueno = cu.nombre_dueno;
+  if (Array.isArray(cu.grupos)) actual.grupos = cu.grupos;
+  if (Array.isArray(cu.intereses)) {
+    actual.resumen = actual.resumen || {};
+    actual.resumen.intereses = cu.intereses;
   }
+  fs.writeFileSync(RUTA_CONFIG, JSON.stringify(actual, null, 2), 'utf8');
+  recargarConfig();
+}
 
-  const filas = chats.map((c) => {
-    const esGrupo = c.chat_id ? c.chat_id.endsWith('@g.us') : true;
-    const tipoTag = esGrupo ? '<span style="font-size:.75rem;background:#e8f4fd;color:#1a73e8;padding:2px 6px;border-radius:10px;margin-left:6px">Grupo</span>' : '<span style="font-size:.75rem;background:#f0fdf4;color:#16a34a;padding:2px 6px;border-radius:10px;margin-left:6px">Individual</span>';
-    return `<tr>
-      <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${c.chat_nombre}${tipoTag}</td>
-      <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0;text-align:center;color:#888">${c.cantidad}</td>
-      <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${selectFrecuencia(c.chat_nombre, c.frecuencia)}</td>
-      <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${esGrupo ? selectOpcion('modo', c.chat_nombre, c.modo, [['normal', 'Normal'], ['catalogo', 'Catálogo (compraventa)']]) : '—'}</td>
-      <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0">${esGrupo ? selectOpcion('det', c.chat_nombre, c.detalle || detalleDefecto(), [['normal', 'Normal'], ['alto', 'Alto']]) : '—'}</td>
-    </tr>`;
-  }).join('');
+// ── Servidor ────────────────────────────────────────────────────────────────
 
-  const mensajeHtml = mensaje
-    ? `<div style="background:#d4edda;border:1px solid #c3e6cb;color:#155724;padding:12px 16px;border-radius:6px;margin-bottom:20px">${mensaje}</div>`
-    : '';
+let callbacksWA = null;
 
-  return `<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Configurar chats monitoreados</title>
-  <style>
-    body { font-family: sans-serif; background: #f0f2f5; margin: 0; padding: 24px 16px; color: #111; }
-    .card { background: #fff; border-radius: 12px; max-width: 700px; margin: 0 auto; padding: 32px 24px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
-    h2 { margin: 0 0 8px; font-size: 1.4rem; }
-    .subtitle { color: #888; font-size: .9rem; margin-bottom: 24px; }
-    label { font-weight: 600; display: block; margin-bottom: 6px; }
-    input[type=text] { width: 100%; box-sizing: border-box; padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; margin-bottom: 20px; }
-    textarea { width: 100%; box-sizing: border-box; padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; margin-bottom: 20px; font-family: inherit; }
-    .ayuda { color: #888; font-size: .8rem; margin: -14px 0 20px; }
-    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-    th { text-align: left; padding: 10px 12px; background: #f8f9fa; font-size: .85rem; color: #555; border-bottom: 2px solid #e0e0e0; }
-    .btn { display: inline-block; padding: 10px 28px; background: #075e54; color: #fff; border: none; border-radius: 6px; font-size: 1rem; cursor: pointer; margin-top: 20px; }
-    .btn:hover { background: #064c44; }
-    .back { display: inline-block; margin-bottom: 20px; color: #075e54; text-decoration: none; font-size: .9rem; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <a href="/" class="back">← Volver al inicio</a>
-    <h2>⚙️ Configurar chats monitoreados</h2>
-    <p class="subtitle">Elegí con qué frecuencia querés recibir resúmenes de cada chat.</p>
-    ${mensajeHtml}
-    <form method="POST" action="/configurar">
-      <label for="nombre_dueno">Tu nombre (opcional — para personalizar los resúmenes)</label>
-      <input type="text" id="nombre_dueno" name="nombre_dueno" value="${(configActual.nombre_dueno || '').replace(/"/g, '&quot;')}" placeholder="Ej: Martín">
-      <label for="intereses">Mis intereses (alerta cuando alguien los menciona en cualquier chat)</label>
-      <textarea id="intereses" name="intereses" rows="2" placeholder="Ej: cochecito, bicicleta, talle 10">${(configActual.resumen?.intereses || []).join(', ').replace(/&/g, '&amp;').replace(/</g, '&lt;')}</textarea>
-      <p class="ayuda">Separalos con coma. Modo "Catálogo": para grupos de compraventa, lista cada artículo por vendedor. Detalle "Alto": no descarta ofertas ni temas menores.</p>
-      <label>Chats con mensajes recientes (últimos 30 días)</label>
-      <table>
-        <thead>
-          <tr>
-            <th>Chat</th>
-            <th style="text-align:center">Mensajes</th>
-            <th>Frecuencia</th>
-            <th>Modo</th>
-            <th>Detalle</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${filas || '<tr><td colspan="5" style="padding:20px;text-align:center;color:#888">No hay mensajes recientes en la base de datos.</td></tr>'}
-        </tbody>
-      </table>
-      <button type="submit" class="btn">💾 Guardar configuración</button>
-    </form>
-  </div>
-</body>
-</html>`;
+async function reiniciarVinculacion() {
+  await limpiarAuth();
+  try { await desconectarWA(); } catch {}
+  estadoWA = 'arrancando';
+  // Pausa para que el socket viejo termine de cerrarse antes de abrir uno nuevo.
+  setTimeout(() => {
+    iniciarCliente(callbacksWA || {}).catch((err) => console.error(`[WA] Error al re-vincular:`, err.message));
+  }, 3000);
+}
+
+function enviarHTML(res, html, status = 200) {
+  res.statusCode = status;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.end(html);
+}
+
+function redirigir(res, destino, cookie) {
+  if (cookie) res.setHeader('Set-Cookie', cookie);
+  res.setHeader('Location', destino);
+  res.writeHead(302);
+  res.end();
+}
+
+// Páginas de estado que no muestran datos: se ven sin clave, así siempre se
+// puede escanear el QR aunque no haya forma de recibir el link.
+async function paginaSegunEstado() {
+  if (estadoWA === 'qr' && qrActual) {
+    return panel.paginaQR(await QRCode.toDataURL(qrActual, { width: 280, margin: 2 }));
+  }
+  if (estadoWA === 'autenticando') {
+    const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : 0;
+    return panel.paginaEstado({ icono: '🔄', titulo: 'Conectando con WhatsApp…', texto: `Esperando hace ${segs} s.${segs > 45 ? ' Está tardando más de lo normal; si sigue así, revisá los logs en Render.' : ''}`, refresco: 3 });
+  }
+  if (estadoWA === 'error_db') return panel.paginaEstado({ icono: '🗄️', titulo: 'Sin conexión a la base', texto: 'No pude conectar con Turso. Reintento solo; si dura mucho, revisá TURSO_URL y TURSO_TOKEN en Render.', refresco: 10, tono: 'error' });
+  if (estadoWA === 'error_wa') return panel.paginaEstado({ icono: '⚠️', titulo: 'WhatsApp no arrancó', texto: 'No pude iniciar el cliente de WhatsApp. Revisá los logs en Render.', refresco: 10, tono: 'error' });
+  return panel.paginaEstado({ icono: '⏳', titulo: 'Arrancando…', texto: 'El bot se está iniciando.', refresco: 3 });
 }
 
 function iniciarServidor() {
   const server = http.createServer(async (req, res) => {
-    if (req.url === '/health' && req.method === 'GET') {
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ version: 'resumenes-v2', whatsapp: estadoWA }));
+    let url;
+    try {
+      url = new URL(req.url, 'http://localhost');
+    } catch {
+      enviarHTML(res, panel.paginaNoEncontrado(), 400);
       return;
     }
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    const ruta = url.pathname;
+    const metodo = req.method;
 
-    if (req.url === '/test' && req.method === 'GET') {
-      if (!botOperativo()) {
-        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>&#9888;&#65039; El bot no est&#225; conectado a&#250;n</h2><p>Primero escane&#225; el QR para vincular WhatsApp.</p><a href="/">&#8592; Volver</a></body></html>`);
+    try {
+      if (ruta === '/health') {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ ok: true, whatsapp: estadoWA }));
         return;
       }
-      try {
-        await guardarMensaje({ chatId: 'test@c.us', chatNombre: 'Chat de prueba', remitente: 'Tester', remitenteId: 'test@c.us', cuerpo: 'Este es un mensaje de prueba URGENTE.', timestamp: Math.floor(Date.now() / 1000), esVip: false, tieneKeyword: true });
-        await procesarMensajes();
-        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>&#9989; Prueba ejecutada</h2><p>Revis&#225; tu WhatsApp.</p><a href="/">&#8592; Volver</a></body></html>`);
-      } catch (err) {
-        res.end(`<p>Error en prueba: ${err.message}</p>`);
-      }
-      return;
-    }
 
-    if (req.url === '/procesar' && req.method === 'GET') {
-      if (!botOperativo()) { res.end(`<p>El bot no est&#225; conectado.</p>`); return; }
-      try {
-        await procesarMensajes();
-        res.end(`<p>An&#225;lisis ejecutado. Revis&#225; ntfy.</p><a href="/">Volver</a>`);
-      } catch (err) {
-        res.end(`<p>Error: ${err.message}</p>`);
-      }
-      return;
-    }
-
-    if (req.url?.startsWith('/resumen') && req.method === 'GET') {
-      if (!botOperativo()) { res.end(`<p>El bot no est&#225; conectado.</p>`); return; }
-      const params = new URL(req.url, `http://localhost`).searchParams;
-      const horas = Number(params.get('h')) || 24;
-      if (![24, 72, 168].includes(horas)) {
-        res.end(`<p>Per&#237;odo inv&#225;lido. Us&#225; h=24, h=72 o h=168.</p>`);
+      // Link con clave: guarda la cookie y redirige a la misma página sin la
+      // clave en la URL (no queda en el historial ni se comparte por error).
+      const dada = url.searchParams.get('k');
+      if (dada && claveValida(dada)) {
+        url.searchParams.delete('k');
+        const cookie = `${COOKIE_PANEL}=${encodeURIComponent(clavePanel)}; Max-Age=31536000; Path=/; HttpOnly; SameSite=Lax; Secure`;
+        redirigir(res, `${ruta}${url.search}`, cookie);
         return;
       }
-      resumenPeriodo(horas).catch((err) => console.error(`[Resumen ${horas}h]`, err.message));
-      const label = horas === 24 ? '24 horas' : horas === 72 ? '72 horas' : '7 d&#237;as';
-      res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Resumen ${label}</title></head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:420px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><div style="font-size:3rem;margin-bottom:16px">&#128203;</div><h2 style="margin:0 0 12px">Generando resumen de las &#250;ltimas ${label}...</h2><p style="color:#555">Analizando mensajes (le&#237;dos y no le&#237;dos) con Gemini.</p><p style="color:#888;font-size:.85rem;margin-top:16px">Recib&#237;s el resultado por WhatsApp en cuanto termine.</p><a href="/" style="display:inline-block;margin-top:24px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none">Volver al inicio</a></div></body></html>`);
-      return;
-    }
 
-    if (req.url === '/sin-responder' && req.method === 'GET') {
-      if (!botOperativo()) { res.end(`<p>El bot no est&#225; conectado.</p>`); return; }
-      enviarSinResponder().catch((err) => console.error(`[Sin responder]`, err.message));
-      res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chats sin responder</title></head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:420px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><div style="font-size:3rem;margin-bottom:16px">&#128172;</div><h2 style="margin:0 0 12px">Revisando chats sin responder...</h2><p style="color:#555">Busco chats individuales de la &#250;ltima semana donde te escribieron y no contestaste.</p><p style="color:#888;font-size:.85rem;margin-top:16px">Recib&#237;s el resultado por WhatsApp en cuanto termine.</p><a href="/" style="display:inline-block;margin-top:24px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none">Volver al inicio</a></div></body></html>`);
-      return;
-    }
-
-    if (req.url === '/limpiar-sesion' && req.method === 'GET') {
-      try {
-        await limpiarAuth();
-        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>Sesi&#243;n borrada</h2><p>Reinici&#225; el servicio en Render → al arrancar te va a pedir el QR de nuevo.</p><p style="color:#888;font-size:.85rem">Despu&#233;s de re-escanear, WhatsApp va a re-sincronizar el historial.</p></body></html>`);
-      } catch (err) {
-        res.end(`<p>Error: ${err.message}</p>`);
+      if (ruta === '/enviar-link' && metodo === 'POST') {
+        const r = await enviarLinkPanel();
+        enviarHTML(res, panel.paginaAcceso({ enviado: r === 'enviado', espera: r === 'espera' }));
+        return;
       }
-      return;
-    }
 
-    if (req.url === '/historial' && req.method === 'GET') {
-      if (!botOperativo()) { res.end(`<p>El bot no est&#225; conectado.</p>`); return; }
-      try {
-        const todos = await obtenerMensajesSinProcesar();
-        const grupales = todos.filter((m) => m.chat_id?.endsWith('@g.us')).length;
-        const individuales = todos.length - grupales;
-        procesarMensajes().catch((err) => console.error('[Historial]', err.message));
-        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>Procesando historial</h2><p>${todos.length} mensajes pendientes (${grupales} grupales, ${individuales} individuales)</p><p style="color:#888;font-size:.85rem">Vas a recibir las notificaciones en ntfy.</p><a href="/">Volver</a></body></html>`);
-      } catch (err) {
-        res.end(`<p>Error: ${err.message}</p>`);
+      if (!botOperativo() && !['/reportes', '/reporte', '/configurar', '/sesion'].includes(ruta)) {
+        enviarHTML(res, await paginaSegunEstado());
+        return;
       }
-      return;
-    }
 
-    // GET /reportes — historial de digests enviados (auditoría)
-    if (req.url === '/reportes' && req.method === 'GET') {
-      try {
-        const reportes = await obtenerReportes(20);
-        const items = reportes.length
-          ? reportes.map((r) => {
-              const fecha = new Date(r.creado_en * 1000).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
-              const cuerpo = String(r.contenido).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-              return `<details style="background:#fff;border-radius:8px;margin:10px 0;padding:14px 18px;box-shadow:0 1px 6px rgba(0,0,0,.06)"><summary style="cursor:pointer;font-weight:600">${fecha} · <span style="color:#888;font-weight:400">${r.tipo || 'digest'} — ${r.n_mensajes} msgs, ${r.n_temas} temas</span></summary><pre style="white-space:pre-wrap;font-family:inherit;margin:12px 0 0;color:#333">${cuerpo}</pre></details>`;
-            }).join('')
-          : '<p style="color:#888">Todavía no hay reportes guardados.</p>';
-        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reportes</title></head><body style="font-family:sans-serif;background:#f0f2f5;margin:0;padding:24px 16px"><div style="max-width:700px;margin:0 auto"><a href="/" style="color:#075e54;text-decoration:none;font-size:.9rem">← Volver</a><h2>📜 Últimos reportes enviados</h2>${items}</div></body></html>`);
-      } catch (err) {
-        res.end(`<p>Error: ${err.message}</p>`);
+      if (!claveValida(leerCookie(req, COOKIE_PANEL))) {
+        // En "/" el candado responde 200: un monitor de disponibilidad que
+        // pinguee la raíz no lo toma como caída. No muestra ningún dato.
+        const status = clavePanel && ruta !== '/' ? 401 : 200;
+        enviarHTML(res, clavePanel ? panel.paginaAcceso() : await paginaSegunEstado(), status);
+        return;
       }
-      return;
-    }
 
-    // GET /reporte?id=N — un reporte puntual (ej. el detalle completo de un digest)
-    if (req.url?.startsWith('/reporte?') && req.method === 'GET') {
-      try {
-        const id = Number(new URL(req.url, 'http://localhost').searchParams.get('id'));
-        const r = Number.isInteger(id) && id > 0 ? await obtenerReporte(id) : null;
-        if (!r) {
-          res.statusCode = 404;
-          res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>Reporte no encontrado</h2><a href="/reportes">← Ver reportes</a></body></html>`);
+      if (ruta === '/' && metodo === 'GET') {
+        enviarHTML(res, panel.paginaInicio(await estadoPanel()));
+        return;
+      }
+
+      const sinConexion = () => enviarHTML(res, panel.paginaAccion({ icono: '📵', titulo: 'WhatsApp no está conectado', texto: 'Esperá a que reconecte o vinculalo de nuevo desde el inicio.' }));
+
+      if (ruta === '/procesar' || ruta === '/historial') {
+        if (!botOperativo()) return sinConexion();
+        procesarMensajes().catch((err) => console.error('[Digest manual]', err.message));
+        enviarHTML(res, panel.paginaAccion({ icono: '📋', titulo: 'Preparando tu resumen', texto: 'Analizo los mensajes nuevos y te lo mando por WhatsApp en uno o dos minutos.', detalle: 'Si no hubo nada nuevo, te llega un "todo tranquilo".' }));
+        return;
+      }
+
+      if (ruta === '/resumen') {
+        if (!botOperativo()) return sinConexion();
+        const horas = Number(url.searchParams.get('h')) || 24;
+        if (![24, 72, 168].includes(horas)) {
+          enviarHTML(res, panel.paginaAccion({ icono: '🤔', titulo: 'Período inválido', texto: 'Elegí 24 horas, 3 días o 7 días.' }), 400);
           return;
         }
-        const fecha = new Date(r.creado_en * 1000).toLocaleString('es-AR', { timeZone: TZ });
-        res.end(`<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Detalle completo</title></head><body style="font-family:-apple-system,Segoe UI,sans-serif;background:#f0f2f5;margin:0;padding:20px 12px;color:#111"><div style="max-width:720px;margin:0 auto"><a href="/reportes" style="color:#075e54;text-decoration:none;font-size:.9rem">← Reportes</a><div style="color:#888;font-size:.8rem;margin-top:8px">${fecha} · ${r.tipo || 'reporte'}</div><div style="background:#fff;border-radius:12px;padding:20px;margin-top:8px;box-shadow:0 2px 12px rgba(0,0,0,.08);line-height:1.55;font-size:1rem;white-space:pre-wrap;word-break:break-word">${htmlDesdeTexto(r.contenido)}</div></div></body></html>`);
-      } catch (err) {
-        res.end(`<p>Error: ${err.message}</p>`);
+        resumenPeriodo(horas).catch((err) => console.error(`[Resumen ${horas}h]`, err.message));
+        const label = horas === 24 ? 'las últimas 24 horas' : horas === 72 ? 'los últimos 3 días' : 'la última semana';
+        enviarHTML(res, panel.paginaAccion({ icono: '🗂️', titulo: 'Generando resumen', texto: `Reviso todo lo de ${label}, leído o no, y te lo mando por WhatsApp.`, detalle: 'Puede tardar un par de minutos si hay muchos chats.' }));
+        return;
       }
-      return;
-    }
 
-    // GET /configurar — página de configuración de chats
-    if (req.url === '/configurar' && req.method === 'GET') {
-      try {
-        const params = new URL(req.url, `http://localhost`).searchParams;
-        const mensaje = params.get('ok') ? '✅ Configuración guardada correctamente.' : '';
+      if (ruta === '/sin-responder') {
+        if (!botOperativo()) return sinConexion();
+        enviarSinResponder().catch((err) => console.error(`[Sin responder]`, err.message));
+        enviarHTML(res, panel.paginaAccion({ icono: '💬', titulo: 'Revisando tus chats', texto: 'Busco conversaciones de la última semana donde te escribieron y no contestaste. Te mando la lista por WhatsApp.' }));
+        return;
+      }
+
+      if (ruta === '/test') {
+        if (!botOperativo()) return sinConexion();
+        enviarPrueba().catch((err) => console.error('[Prueba]', err.message));
+        enviarHTML(res, panel.paginaAccion({ icono: '🔔', titulo: 'Prueba enviada', texto: 'Te mandé un mensaje de prueba por WhatsApp y por ntfy. Si te llegan los dos, todo funciona.' }));
+        return;
+      }
+
+      if (ruta === '/sesion' || ruta === '/limpiar-sesion') {
+        if (metodo === 'POST') {
+          await reiniciarVinculacion();
+          enviarHTML(res, panel.paginaSesion({ hecho: true }));
+        } else {
+          enviarHTML(res, panel.paginaSesion());
+        }
+        return;
+      }
+
+      if (ruta === '/reportes') {
+        enviarHTML(res, panel.paginaReportes(await obtenerReportes(30), { tz: TZ }));
+        return;
+      }
+
+      if (ruta === '/reporte') {
+        const id = Number(url.searchParams.get('id'));
+        const r = Number.isInteger(id) && id > 0 ? await obtenerReporte(id) : null;
+        if (!r) {
+          enviarHTML(res, panel.paginaNoEncontrado(), 404);
+          return;
+        }
+        enviarHTML(res, panel.paginaReporte(r, htmlDesdeTexto(r.contenido), { tz: TZ }));
+        return;
+      }
+
+      if (ruta === '/configurar' && metodo === 'GET') {
         const [chatsDB, contactos] = await Promise.all([obtenerChatsDistintos(30), obtenerContactos()]);
-        const html = generarPaginaConfiguracion(chatsDB, config, contactos, mensaje);
-        res.end(html);
-      } catch (err) {
-        console.error(`[Config] Error generando página:`, err.message);
-        res.end(`<p>Error: ${err.message}</p>`);
+        enviarHTML(res, panel.paginaConfigurar({
+          chats: armarChatsConfig(chatsDB, config, contactos),
+          nombreDueno: config.nombre_dueno || '',
+          intereses: config.resumen?.intereses || [],
+          detalleDefecto: detalleDefecto(),
+          mensaje: url.searchParams.get('ok') ? 'Configuración guardada.' : '',
+        }));
+        return;
       }
-      return;
-    }
 
-    // POST /configurar — guardar configuración
-    if (req.url === '/configurar' && req.method === 'POST') {
-      try {
+      if (ruta === '/configurar' && metodo === 'POST') {
         const params = await leerBody(req);
-        const nombreDueno = (params.get('nombre_dueno') || '').trim();
-
-        // Reconstruir array de grupos a partir de los campos freq_CHATKEY
-        const nuevosGrupos = [];
+        const grupos = [];
         for (const [key, value] of params.entries()) {
           if (!key.startsWith('freq_')) continue;
           const frecuencia = parseInt(value, 10);
-          if (isNaN(frecuencia) || frecuencia <= 0) continue; // Desactivado o inválido
-          const sufijo = key.slice(5); // quitar prefijo "freq_"
-          const chatNombre = decodeURIComponent(sufijo);
-          nuevosGrupos.push({
-            nombre: chatNombre,
+          if (isNaN(frecuencia) || frecuencia <= 0) continue;
+          const sufijo = key.slice(5);
+          grupos.push({
+            nombre: decodeURIComponent(sufijo),
             frecuencia_horas: frecuencia,
             ...(params.get(`modo_${sufijo}`) === 'catalogo' ? { modo: 'catalogo' } : {}),
             ...(['alto', 'normal'].includes(params.get(`det_${sufijo}`)) ? { detalle: params.get(`det_${sufijo}`) } : {}),
           });
         }
-
-        // Leer config actual y actualizarla
-        const configPath = path.join(__dirname, 'config.json');
-        const configActual = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-        configActual.nombre_dueno = nombreDueno;
-        configActual.grupos = nuevosGrupos;
-        if (params.has('intereses')) {
-          configActual.resumen = configActual.resumen || {};
-          configActual.resumen.intereses = params.get('intereses').split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-        }
-
-        fs.writeFileSync(configPath, JSON.stringify(configActual, null, 2), 'utf8');
-        recargarConfig();
-
-        console.log(`[Config] Guardada — nombre_dueno="${nombreDueno}", ${nuevosGrupos.length} grupos`);
-
-        res.setHeader('Location', '/configurar?ok=1');
-        res.writeHead(302);
-        res.end();
-      } catch (err) {
-        console.error(`[Config] Error guardando:`, err.message);
-        res.end(`<p>Error guardando configuraci&#243;n: ${err.message}</p>`);
+        const cu = { nombre_dueno: (params.get('nombre_dueno') || '').trim(), grupos };
+        if (params.has('intereses')) cu.intereses = params.get('intereses').split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+        aplicarConfigUsuario(cu);
+        const guardada = await guardarAjuste('config_usuario', cu);
+        console.log(`[Config] Guardada — nombre="${cu.nombre_dueno}", ${grupos.length} grupos${guardada ? '' : ' (OJO: no se pudo guardar en Turso, se pierde en el próximo deploy)'}`);
+        redirigir(res, '/configurar?ok=1');
+        return;
       }
-      return;
-    }
 
-    if (botOperativo()) {
-      const encabezado = estadoWA === 'standby'
-        ? `<h2>&#128277; Modo ahorro de notificaciones</h2><p>El bot est&#225; vinculado pero <strong>desconectado a prop&#243;sito</strong> para que las notificaciones lleguen siempre a tu tel&#233;fono.<br>Se conecta solo autom&#225;ticamente en los horarios del resumen o cuando ped&#237;s uno manual.</p>`
-        : `<h2>&#9989; WhatsApp conectado</h2><p>El bot est&#225; activo y escuchando mensajes.</p>`;
-      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">${encabezado}<h3 style="margin-top:32px;color:#555">Res&#250;menes por per&#237;odo</h3><p style="color:#888;font-size:.85rem;margin:0 0 12px">Analiza todos los mensajes (le&#237;dos y no le&#237;dos) del per&#237;odo elegido</p><p><a href="/resumen?h=24" style="display:inline-block;margin:6px;padding:10px 24px;background:#27ae60;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 24 horas</a></p><p><a href="/resumen?h=72" style="display:inline-block;margin:6px;padding:10px 24px;background:#16a085;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltimas 72 horas</a></p><p><a href="/resumen?h=168" style="display:inline-block;margin:6px;padding:10px 24px;background:#117a65;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128203; &#218;ltima semana</a></p><p><a href="/sin-responder" style="display:inline-block;margin:6px;padding:10px 24px;background:#d35400;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128172; Chats sin responder (&#250;ltima semana)</a></p><h3 style="margin-top:32px;color:#555">Configuraci&#243;n</h3><p><a href="/configurar" style="display:inline-block;margin:6px;padding:10px 24px;background:#6c3483;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#9881;&#65039; Configurar chats</a></p><p><a href="/reportes" style="display:inline-block;margin:6px;padding:10px 24px;background:#34495e;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">&#128220; Ver reportes enviados</a></p><h3 style="margin-top:32px;color:#555">Mantenimiento</h3><p><a href="/test" style="display:inline-block;margin:6px;padding:10px 24px;background:#075e54;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Enviar mensaje de prueba</a></p><p><a href="/procesar" style="display:inline-block;margin:6px;padding:10px 24px;background:#1d6fa4;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Procesar mensajes nuevos (cron manual)</a></p><p><a href="/historial" style="display:inline-block;margin:6px;padding:10px 24px;background:#7d3c98;color:#fff;border-radius:6px;text-decoration:none;font-size:.95rem">Revisar historial completo</a></p><p style="margin-top:24px"><a href="/limpiar-sesion" style="display:inline-block;margin:6px;padding:8px 20px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem" onclick="return confirm('Borrar sesi&#243;n?')">Limpiar sesi&#243;n y re-sincronizar</a></p></body></html>`);
-      return;
+      enviarHTML(res, panel.paginaNoEncontrado(), 404);
+    } catch (err) {
+      console.error(`[Server] Error en ${ruta}:`, err.message);
+      if (!res.headersSent) enviarHTML(res, panel.paginaAccion({ icono: '⚠️', titulo: 'Algo falló', texto: err.message }), 500);
     }
-
-    if (estadoWA === 'autenticando') {
-      const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : 0;
-      res.end(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="3"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Conectando...</title></head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:400px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><div style="font-size:3rem;margin-bottom:16px">&#128260;</div><h2 style="margin:0 0 12px">Conectando con WhatsApp...</h2><p style="color:#555;margin:0 0 8px">Estableciendo conexi&#243;n con los servidores de WhatsApp.</p><p style="color:#888;font-size:.85rem">Tiempo esperando: ${segs}s &#8212; esta p&#225;gina se actualiza sola cada 3 segundos.</p>${segs > 30 ? '<p style="color:#c0392b;font-size:.85rem;margin-top:16px">&#9888;&#65039; Est&#225; tardando m&#225;s de lo normal. Revis&#225; los logs en Render.</p>' : ''}</div></body></html>`);
-      return;
-    }
-
-    if (estadoWA === 'qr' && qrActual) {
-      try {
-        const imgDataUrl = await QRCode.toDataURL(qrActual, { width: 280, margin: 2 });
-        res.end(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="30"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vincular WhatsApp</title><style>body{font-family:sans-serif;background:#f0f2f5;margin:0;padding:32px 16px;color:#111}.card{background:#fff;border-radius:12px;max-width:480px;margin:0 auto;padding:32px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08);text-align:center}h2{margin:0 0 8px;font-size:1.3rem}.warning{background:#fff3cd;border-left:4px solid #f0a500;border-radius:4px;padding:12px 16px;margin:20px 0;text-align:left;font-size:.9rem}.steps{text-align:left;background:#f0f2f5;border-radius:8px;padding:16px 16px 16px 32px;margin:20px 0;font-size:.92rem;line-height:1.8}.steps li{margin-bottom:4px}.steps strong{color:#075e54}.qr-img{border:3px solid #075e54;border-radius:8px;padding:8px;margin:20px auto;display:block}.refresh-note{color:#888;font-size:.8rem;margin-top:16px}.platform{margin-top:16px}.platform summary{cursor:pointer;font-size:.85rem;color:#555}.platform ol{margin:8px 0 0;font-size:.85rem;line-height:1.7;padding-left:20px}</style></head><body><div class="card"><h2>&#128241; Vincular WhatsApp al bot</h2><div class="warning">&#9888;&#65039; <strong>No uses la c&#225;mara del tel&#233;fono ni Google Lens</strong> para escanear este QR &#8212; eso no funciona con WhatsApp.<br>Deb&#233;s escanearlo desde <strong>adentro de la app de WhatsApp</strong>.</div><img src="${imgDataUrl}" class="qr-img" width="280" height="280" alt="QR WhatsApp"/><div class="steps"><strong>Android:</strong><ol><li>Abr&#237; <strong>WhatsApp</strong></li><li>Toc&#225; los <strong>tres puntos &#8942;</strong> (arriba a la derecha)</li><li>Toc&#225; <strong>Dispositivos vinculados</strong></li><li>Toc&#225; <strong>Vincular dispositivo</strong></li><li>Apunt&#225; la c&#225;mara <em>de WhatsApp</em> al QR de arriba</li></ol></div><details class="platform"><summary>&#191;Us&#225;s iPhone? Ver pasos para iOS</summary><ol><li>Abr&#237; <strong>WhatsApp</strong></li><li>Toc&#225; <strong>Configuraci&#243;n</strong> (abajo a la derecha)</li><li>Toc&#225; <strong>Dispositivos vinculados</strong></li><li>Toc&#225; <strong>Vincular dispositivo</strong></li><li>Apunt&#225; la c&#225;mara <em>de WhatsApp</em> al QR de arriba</li></ol></details><p class="refresh-note">Esta p&#225;gina se actualiza sola cada 30 segundos. El QR expira en ~60 seg.</p></div></body></html>`);
-      } catch (err) {
-        res.end(`<p>Error generando QR: ${err.message}</p>`);
-      }
-      return;
-    }
-
-    if (estadoWA === 'error_db') {
-      res.end(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="10"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:400px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><div style="font-size:3rem;margin-bottom:16px">&#10060;</div><h2 style="margin:0 0 12px;color:#c0392b">Error de base de datos</h2><p style="color:#555">No se pudo conectar a Turso. Revis&#225; las variables TURSO_URL y TURSO_TOKEN en Render.</p><p style="color:#888;font-size:.85rem">Esta p&#225;gina se actualiza cada 10 segundos.</p></div></body></html>`);
-      return;
-    }
-
-    if (estadoWA === 'error_wa') {
-      res.end(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="10"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:400px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><div style="font-size:3rem;margin-bottom:16px">&#10060;</div><h2 style="margin:0 0 12px;color:#c0392b">Error de WhatsApp</h2><p style="color:#555">No se pudo inicializar el cliente de WhatsApp. Revis&#225; los logs en Render para m&#225;s detalles.</p><p style="color:#888;font-size:.85rem">Esta p&#225;gina se actualiza cada 10 segundos.</p></div></body></html>`);
-      return;
-    }
-
-    res.end(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="2"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:sans-serif;text-align:center;padding:60px;background:#f0f2f5"><div style="background:#fff;border-radius:12px;max-width:400px;margin:0 auto;padding:40px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><div style="font-size:3rem;margin-bottom:16px">&#9203;</div><h2 style="margin:0 0 12px">Arrancando bot...</h2><p style="color:#888;font-size:.85rem">Esta p&#225;gina se actualiza sola cada 2 segundos.</p></div></body></html>`);
   });
 
   server.on('error', (err) => {
@@ -848,8 +900,19 @@ async function analizarLote(todos, etiqueta, sinResponder = null) {
   const resumenesChats = [];
   const idsProcesados = [];
   let erroresAnalisis = 0;
+  let triviales = 0;
+  // Un chat cuyos mensajes nuevos son todos "ok", "gracias", risas o emojis no
+  // aporta nada: se da por leído sin gastar una llamada a Gemini.
+  const soloTrivial = (lista) => {
+    const nuevos = lista.filter((m) => !m.solo_contexto);
+    if (!nuevos.length || !nuevos.every((m) => esTrivial(m.cuerpo))) return false;
+    idsProcesados.push(...nuevos.map((m) => m.id));
+    triviales++;
+    return true;
+  };
   for (const [chatId, mensajesChat] of porChat) {
     const chatNombre = mensajesChat[0].chat_nombre || chatId;
+    if (soloTrivial(mensajesChat)) continue;
     console.log(`[Análisis${etiqueta ? ' ' + etiqueta : ''}] "${chatNombre}" (${mensajesChat.length} mensajes)`);
     try {
       const opciones = obtenerOpcionesGrupo(chatNombre);
@@ -865,9 +928,16 @@ async function analizarLote(todos, etiqueta, sinResponder = null) {
 
   // Individuales
   let resIndiv = { eventos: [], compromisos: [], pedidos: [] };
-  if (individuales.length) {
+  const porChatIndiv = new Map();
+  for (const m of individuales) {
+    if (!porChatIndiv.has(m.chat_id)) porChatIndiv.set(m.chat_id, []);
+    porChatIndiv.get(m.chat_id).push(m);
+  }
+  const individualesUtiles = [...porChatIndiv.values()].filter((lista) => !soloTrivial(lista)).flat();
+  if (triviales) console.log(`[Análisis] ${triviales} chat(s) con solo saludos, "ok" o emojis: se omiten sin usar Gemini`);
+  if (individualesUtiles.length) {
     try {
-      const r = await analizarIndividuales(individuales, contactos, { detalle: detalleDefecto() });
+      const r = await analizarIndividuales(individualesUtiles, contactos, { detalle: detalleDefecto() });
       resIndiv = r;
       idsProcesados.push(...(r.idsProcesados || []));
       erroresAnalisis += r.errores || 0;
@@ -899,6 +969,8 @@ async function analizarLote(todos, etiqueta, sinResponder = null) {
     seccionSinResponder: formatearSinResponder(sinResponder || {}),
     seccionIntereses: formatearIntereses(coincidencias),
     seccionConversaciones: convs.texto,
+    pendientes: accionables.pendientes.length,
+    urgentes: accionables.pendientes.filter((p) => urgencia(p.fecha).peso <= 1).length,
   };
   const texto = formatearDigest(accionables, resumenesChats, meta);
   // Saludos y charla de cortesía (relevancia 1) de las conversaciones no cuentan:
@@ -928,8 +1000,8 @@ async function resumenPeriodo(horas) {
       if (!todos.length) {
         console.log(`[Resumen ${labelHoras}] Sin mensajes en el período`);
         const txt = `📋 *Resumen últimas ${labelHoras}*\n\nNo hay mensajes en este período.`;
-        postNtfy(`Resumen ${labelHoras}`, txt.replace(/\*/g, ''));
-        try { await enviarTextoLibre(txt); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message); }
+        postNtfy(`Resumen ${labelHoras}`, txt, opcionesNtfy());
+        try { await enviarTextoLibre(textoParaWhatsApp(txt)); } catch (err) { console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message); }
         return;
       }
 
@@ -937,13 +1009,13 @@ async function resumenPeriodo(horas) {
       const { totalTemas } = analisis;
       const texto = await adjuntarDetalle(analisis.texto, analisis.detalle, todos.length, totalTemas);
       try {
-        await enviarTextoLibre(texto);
+        await enviarTextoLibre(textoParaWhatsApp(texto));
         console.log(`[Resumen ${labelHoras}] Enviado — ${totalTemas} temas`);
-        postNtfy(`Resumen ${labelHoras}`, texto.replace(/\*/g, '').replace(/_/g, ''));
-        await guardarReporte(`periodo_${horas}h`, texto, todos.length, totalTemas);
       } catch (err) {
         console.error(`[Resumen ${labelHoras}] Error enviando WA:`, err.message);
       }
+      postNtfy(`Resumen ${labelHoras}`, texto, opcionesNtfy(analisis.meta));
+      await guardarReporte(`periodo_${horas}h`, texto, todos.length, totalTemas);
     });
   } catch (err) {
     console.error(`[Resumen ${labelHoras}] Error general:`, err.message);
@@ -967,11 +1039,11 @@ async function enviarSinResponder() {
           ? `${formatearSinResponder(r)}\n\n_Últimos ${dias} días · chats individuales_`
           : `✅ No tenés chats individuales sin responder en los últimos ${dias} días.`;
       try {
-        await enviarTextoLibre(texto);
+        await enviarTextoLibre(textoParaWhatsApp(texto));
       } catch (err) {
         console.error(`[Sin responder] Error enviando WA:`, err.message);
       }
-      postNtfy('Chats sin responder', texto.replace(/\*/g, '').replace(/_/g, ''));
+      postNtfy('Chats sin responder', texto, { prioridad: r.items.length ? 'default' : 'low', tags: ['speech_balloon'], click: urlPublica() });
       await guardarReporte('sin_responder', texto, 0, r.items.length);
     });
   } catch (err) {
@@ -997,7 +1069,7 @@ async function generarDigest(etiqueta) {
       });
       const seccionSinResp = formatearSinResponder(sinResp);
 
-      const todos = await obtenerMensajesSinProcesar();
+      const todos = await obtenerMensajesSinProcesar({ contexto: config.resumen?.mensajes_contexto ?? 12 });
       if (!todos.length) {
         // Mensaje corto igual: JO sabe que el bot está vivo y no se perdió nada
         console.log(`[Digest] Sin mensajes nuevos — enviando mensaje corto${seccionSinResp ? ' con chats sin responder' : ' "todo tranquilo"'}`);
@@ -1006,9 +1078,9 @@ async function generarDigest(etiqueta) {
           : `✅ *Todo tranquilo* — no hubo mensajes nuevos desde el último resumen.`;
         // ntfy SIEMPRE, aunque no haya nada: antes este camino hacía return sin
         // notificar y ntfy quedaba mudo justo cuando WA fallaba en descifrar.
-        postNtfy(`Resumen ${etiqueta || ''}`.trim() || 'Resumen', txt.replace(/\*/g, '').replace(/_/g, ''));
+        postNtfy(`Resumen ${etiqueta || ''}`.trim() || 'Resumen', txt, opcionesNtfy());
         try {
-          const ok = await enviarTextoLibre(txt);
+          const ok = await enviarTextoLibre(textoParaWhatsApp(txt));
           if (ok) await guardarReporte('digest', txt, 0, sinResp.items.length);
         } catch (err) {
           console.error(`[Digest] No se pudo enviar (WA no conectado):`, err.message);
@@ -1016,13 +1088,17 @@ async function generarDigest(etiqueta) {
         return;
       }
 
-      let { texto, idsProcesados, totalTemas, erroresAnalisis, detalle } = await analizarLote(todos, etiqueta, sinResp);
+      let { texto, idsProcesados, totalTemas, erroresAnalisis, detalle, meta } = await analizarLote(todos, etiqueta, sinResp);
+      const gem = usoGemini();
+      const sinCuota = gem.total >= gem.limite;
 
       // Hubo mensajes pero nada relevante: mensaje corto en vez del esqueleto del digest.
       // Si además hubo errores de análisis, decirlo — antes un fallo total de Gemini
       // salía disfrazado de "todo tranquilo" y era imposible enterarse.
       if (totalTemas === 0) {
-        texto = erroresAnalisis > 0
+        texto = sinCuota
+          ? `⚠️ *Ojo* — llegué al tope diario gratuito de Gemini (${gem.total} consultas), así que no pude analizar ${todos.length} mensajes nuevos. Quedan guardados y entran en el próximo resumen.`
+          : erroresAnalisis > 0
           ? `⚠️ *Ojo* — había ${todos.length} mensajes nuevos pero falló el análisis (${erroresAnalisis} error/es con Gemini). Lo pendiente se reintenta en el próximo resumen.`
           : seccionSinResp
             ? `✅ Revisé ${todos.length} mensajes nuevos y no hay novedades para vos.`
@@ -1034,19 +1110,25 @@ async function generarDigest(etiqueta) {
 
       let enviado = false;
       try {
-        enviado = await enviarTextoLibre(texto);
+        enviado = await enviarTextoLibre(textoParaWhatsApp(texto));
       } catch (err) {
         console.error(`[Digest] No se pudo enviar (WA no conectado):`, err.message);
       }
-      postNtfy(`Resumen ${etiqueta || ''}`.trim(), texto.replace(/\*/g, '').replace(/_/g, ''));
+      postNtfy(`Resumen ${etiqueta || ''}`.trim() || 'Resumen', texto, opcionesNtfy(meta));
+      if (!enviado) alertar('envio', 'No pude mandarte el resumen por WhatsApp', 'El resumen de arriba no llegó por WhatsApp. Revisá el panel: puede que haya que vincular de nuevo.', 3);
       await guardarReporte('digest', texto, todos.length, totalTemas);
 
       // Solo marcamos procesados si el envío salió bien; si falló, los mensajes
       // quedan pendientes y el contenido se reintenta en el próximo digest (no se pierde).
       if (enviado) {
         await marcarProcesados(idsProcesados);
-    const fallidos = todos.filter(m => !m.solo_contexto).length - idsProcesados.length;
-        console.log(`[Digest] Enviado — ${totalTemas} temas, ${idsProcesados.length} mensajes procesados${fallidos > 0 ? `, ${fallidos} pendientes para el próximo digest` : ''}`);
+        // Mensajes cuyo análisis falló: se reintentan en el próximo digest, pero
+        // tras varios intentos se abandonan para no gastar Gemini para siempre.
+        // Si el problema fue la cuota, no es culpa de los mensajes: no cuenta.
+        const hechos = new Set(idsProcesados);
+        const fallidos = todos.filter((m) => !m.solo_contexto && !hechos.has(m.id)).map((m) => m.id);
+        const abandonados = fallidos.length && !sinCuota ? await registrarFallos(fallidos, config.resumen?.max_intentos ?? 3) : 0;
+        console.log(`[Digest] Enviado — ${totalTemas} temas, ${idsProcesados.length} mensajes procesados${fallidos.length ? `, ${fallidos.length - abandonados} pendientes para el próximo digest` : ''}${abandonados ? `, ${abandonados} abandonados tras varios intentos fallidos` : ''}`);
       } else {
         console.warn(`[Digest] Envío fallido — no se marcan procesados, se reintenta en el próximo digest`);
       }
@@ -1082,8 +1164,19 @@ async function main() {
     }
   }
   try {
-    await iniciarCliente({
-      onQR: (qr) => { estadoWA = 'qr'; qrActual = qr; tsAutenticando = null; console.log(`[WA] QR listo — abrí ${urlPublica()} para escanearlo`); },
+    aplicarConfigUsuario(await obtenerAjuste('config_usuario'));
+  } catch (err) {
+    console.error(`[Config] No se pudo aplicar la configuración guardada:`, err.message);
+  }
+  await prepararClavePanel().catch((err) => console.error(`[Panel] No se pudo preparar la clave:`, err.message));
+  await cargarUsoGuardado();
+  try {
+    await iniciarCliente(callbacksWA = {
+      onQR: (qr) => {
+        estadoWA = 'qr'; qrActual = qr; tsAutenticando = null;
+        console.log(`[WA] QR listo — abrí ${urlPublica()} para escanearlo`);
+        alertar('qr', 'WhatsApp se desvinculó del bot', 'Para seguir recibiendo resúmenes, abrí el panel y escaneá el código QR desde WhatsApp → Dispositivos vinculados.');
+      },
       onAutenticando: () => { estadoWA = 'autenticando'; qrActual = null; tsAutenticando = Date.now(); console.log(`[WA] QR escaneado — autenticando...`); },
       onListo: () => {
         const segs = tsAutenticando ? Math.round((Date.now() - tsAutenticando) / 1000) : '?';

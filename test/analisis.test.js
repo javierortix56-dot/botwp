@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const { analizarConversacion, agrupar } = require('../analisis');
-const config = { nombre_dueno: 'Javier', max_mensajes_por_batch: 1 };
+const config = { nombre_dueno: 'Javier', max_mensajes_por_batch: 1, gemini: { min_ms_entre_llamadas: 0 } };
 const mensaje = (id, extra = {}) => ({ id, chat_id: 'a@s.whatsapp.net', remitente: 'Ana', cuerpo: 'Confirma la reserva', timestamp: 1789470000 + id, ...extra });
 const tema = (ids, extra = {}) => ({ tema: 'Reserva', resumen: 'Confirmar reserva', tipo: 'accion', estado: 'pendiente', relevancia: 3, para_mi: true, ids, ...extra });
 

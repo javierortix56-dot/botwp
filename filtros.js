@@ -159,4 +159,30 @@ function buscarIntereses(mensajes, intereses) {
   return out;
 }
 
-module.exports = { debeAnalizarse, obtenerFlags, esVip, esGrupoMonitoreado, tieneKeyword, esIndividual, obtenerFrecuenciaGrupo, obtenerConfigGrupo, obtenerOpcionesGrupo, detalleDefecto, buscarIntereses, recargar };
+// Palabras que, solas o combinadas (hasta 4), no aportan nada a un resumen.
+const PALABRAS_TRIVIALES = new Set([
+  'ok', 'oka', 'okey', 'okis', 'okk', 'dale', 'listo', 'lista', 'genial', 'perfecto', 'perfecta', 'joya', 'barbaro', 'buenisimo',
+  'buenisima', 'excelente', 'gracias', 'graciass', 'muchas', 'mil', 'muchisimas', 'si', 'no', 'sip', 'nop', 'claro', 'obvio',
+  'hola', 'holaa', 'buen', 'buenos', 'buenas', 'dia', 'dias', 'tardes', 'noches', 'chau', 'chao', 'besos', 'beso', 'besito',
+  'abrazo', 'abrazos', 'saludos', 'amen', 'feliz', 'finde', 'ok.', 'gracia', 'genia', 'genio', 'idem', 'yo', 'tambien', 'igualmente',
+  'a', 'vos', 'ti', 'todos', 'todas', 'para', 'de', 'nada', 'jaja', 'jeje', 'jiji', 'xd', 'lol', 'q', 'que', 'lindo', 'linda', 'hermoso', 'hermosa',
+]);
+
+/**
+ * true si el texto no aporta nada a un resumen: vacío, solo emojis o signos,
+ * risas, o pocas palabras de cortesía ("ok", "gracias!!", "buen día a todos").
+ * Sirve para no gastar una llamada a Gemini en chats que solo traen eso.
+ */
+function esTrivial(cuerpo) {
+  const t = sinAcentos(cuerpo)
+    .replace(/\[(sticker|reaccion[^\]]*)\]/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t) return true;
+  const palabras = t.split(' ');
+  if (palabras.every((p) => /^(j[aeiou])+j?$|^(ha)+h?$|^x+d+$/.test(p))) return true;
+  return palabras.length <= 4 && palabras.every((p) => PALABRAS_TRIVIALES.has(p) || /^(j[aeiou])+j?$/.test(p));
+}
+
+module.exports = { debeAnalizarse, obtenerFlags, esVip, esGrupoMonitoreado, tieneKeyword, esIndividual, obtenerFrecuenciaGrupo, obtenerConfigGrupo, obtenerOpcionesGrupo, detalleDefecto, buscarIntereses, esTrivial, recargar };
