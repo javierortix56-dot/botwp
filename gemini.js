@@ -173,11 +173,19 @@ async function analizarMensajes(mensajes) {
   return { temas, idsProcesados };
 }
 
+// Nombre legible para un chat sin nombre en la agenda: "+54911..." si el id es
+// un número, o un genérico para los ids internos de WhatsApp (@lid).
+function nombreDeJid(jid) {
+  const [num, dominio] = String(jid || '').split('@');
+  if (dominio === 's.whatsapp.net' && /^\d+$/.test(num)) return `+${num}`;
+  return 'Chat sin nombre guardado';
+}
+
 async function analizarIndividuales(mensajes, contactos = new Map(), opciones = {}) {
   const { agrupar, analizarConversacion } = require('./analisis');
   const salida = { eventos: [], compromisos: [], pedidos: [], conversaciones: [], idsProcesados: [], errores: 0 };
   for (const [chatId, lista] of agrupar(mensajes)) {
-    const nombre = contactos.get(chatId) || lista.find(m => !m.es_propio)?.remitente || chatId;
+    const nombre = contactos.get(chatId) || lista.find(m => !m.es_propio)?.remitente || nombreDeJid(chatId);
     const r = await analizarConversacion(nombre, lista, llamarAnalisis, config, true, opciones);
     salida.idsProcesados.push(...r.idsProcesados);
     salida.errores += r.errores;
@@ -287,4 +295,4 @@ Escribí UNA sola frase (máximo 25 palabras) que le resuma lo más importante, 
   }
 }
 
-module.exports = { analizarMensajes, analizarChat, analizarIndividuales, generarTitular, describirImagen, filtrarSinResponder, usoGemini, cargarUsoGuardado, CuotaAgotada };
+module.exports = { nombreDeJid, analizarMensajes, analizarChat, analizarIndividuales, generarTitular, describirImagen, filtrarSinResponder, usoGemini, cargarUsoGuardado, CuotaAgotada };

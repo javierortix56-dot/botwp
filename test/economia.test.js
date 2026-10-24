@@ -133,6 +133,11 @@ test('gemini: un 429 por minuto se reintenta solo; uno por cuota diaria corta y 
   gemini.respuestas.length = 0;
 });
 
+test('un chat individual sin nombre no muestra el id interno de WhatsApp', () => {
+  assert.equal(gem.nombreDeJid('246402324136096@lid'), 'Chat sin nombre guardado');
+  assert.equal(gem.nombreDeJid('5491164049863@s.whatsapp.net'), '+5491164049863');
+});
+
 // ── Logs sin claves de Signal ───────────────────────────────────────────────
 test('los volcados de sesiones de Signal (con claves privadas) no llegan a los logs', () => {
   const impreso = [];
